@@ -6,7 +6,7 @@ This vault is maintained as a wiki for both human reading and agent operation.
 
 - Put new source material in `raw/` first.
 - Use `daily/YYYY-MM-DD.md` for daily tasks, follow-ups, and short-lived context.
-- Use `meetings/YYYY-MM-DD - subject.md` for meetings and important stakeholder chat threads.
+- Use `meetings/YYYY-MM-DD - subject.md` for actual meetings and only for discussion threads that deserve a standalone record.
 - Use `people/<Name>/index.md` for stakeholder pages.
 - Use `projects/<Project>/index.md` for durable project pages.
 - Use `area/<Topic>/index.md` for durable topic pages.
@@ -15,6 +15,8 @@ This vault is maintained as a wiki for both human reading and agent operation.
 
 - Prefer updating an existing note over creating a near-duplicate.
 - Keep one canonical note per entity or event and link to it from related notes.
+- Do not create a project note unless the source clearly refers to a real project.
+- Do not create a meeting note for a simple chat follow-up that fits cleanly in the daily note.
 - For assets such as screenshots, PDFs, sheets, or documents, add a nearby `.md` context note in `raw/`.
 - Preserve user-authored content unless the task explicitly requires restructuring it.
 
@@ -30,7 +32,7 @@ This vault is maintained as a wiki for both human reading and agent operation.
 ## Maintenance Workflow
 
 1. Capture or summarize new information in `raw/`, `daily/`, or `meetings/`.
-2. Roll durable context into the relevant `people/`, `projects/`, and `area/` pages.
+2. Roll durable context into the relevant `people/`, `projects/`, and `area/` pages when it is more than a one-off daily task.
 3. Add backlinks across the source note and the durable notes.
 4. Update `updated` on substantive edits.
 5. Keep `index.md` current enough to serve as the vault entry point.
