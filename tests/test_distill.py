@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
+import time
+from pathlib import Path
+
 import pytest
 
+from lark_to_notes.budget import BudgetEnforcer, BudgetPolicy
 from lark_to_notes.distill.heuristics import HeuristicClassifier, default_classifier
 from lark_to_notes.distill.models import (
     ClassifierResult,
@@ -13,6 +18,7 @@ from lark_to_notes.distill.models import (
     TaskClass,
 )
 from lark_to_notes.distill.routing import classify_with_routing
+from lark_to_notes.storage.db import init_db
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -29,6 +35,13 @@ def _inp(content: str, **kwargs: str) -> DistillInput:
         direction=kwargs.get("direction", "incoming"),
         created_at=kwargs.get("created_at", "2026-04-14 10:00"),
     )
+
+
+def _budget_conn(tmp_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(tmp_path / "budget-routing.db"))
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -315,18 +328,14 @@ def test_excerpt_is_populated_on_context() -> None:
 
 
 def test_extra_high_pattern() -> None:
-    classifier = HeuristicClassifier(
-        extra_high_patterns=[(r"(?i)\bUrgent\b", "custom_urgent")]
-    )
+    classifier = HeuristicClassifier(extra_high_patterns=[(r"(?i)\bUrgent\b", "custom_urgent")])
     result = classifier.classify(_inp("Urgent: fix the prod issue"))
     assert result.confidence_band == ConfidenceBand.HIGH
     assert result.reason_code == "custom_urgent"
 
 
 def test_extra_medium_pattern() -> None:
-    classifier = HeuristicClassifier(
-        extra_medium_patterns=[(r"(?i)\bsomeday\b", "custom_someday")]
-    )
+    classifier = HeuristicClassifier(extra_medium_patterns=[(r"(?i)\bsomeday\b", "custom_someday")])
     # Use content with no built-in signals so the custom pattern fires
     result = classifier.classify(_inp("Someday I hope to refactor the legacy module"))
     assert result.confidence_band == ConfidenceBand.MEDIUM
@@ -362,9 +371,7 @@ def test_routing_with_returning_provider() -> None:
     from lark_to_notes.distill.routing import LLMProvider
 
     class FakeProvider:
-        def classify(
-            self, inp: DistillInput, hint: ClassifierResult
-        ) -> ClassifierResult | None:
+        def classify(self, inp: DistillInput, hint: ClassifierResult) -> ClassifierResult | None:
             return ClassifierResult(
                 task_class=TaskClass.TASK,
                 confidence_band=ConfidenceBand.HIGH,
@@ -380,9 +387,7 @@ def test_routing_with_returning_provider() -> None:
 
 def test_routing_with_none_returning_provider_falls_back() -> None:
     class NullProvider:
-        def classify(
-            self, inp: DistillInput, hint: ClassifierResult
-        ) -> ClassifierResult | None:
+        def classify(self, inp: DistillInput, hint: ClassifierResult) -> ClassifierResult | None:
             return None
 
     # High-band with long content: escalate=True but provider returns None → use heuristics
@@ -395,12 +400,218 @@ def test_routing_with_none_returning_provider_falls_back() -> None:
 
 def test_routing_with_raising_provider_falls_back() -> None:
     class BrokenProvider:
-        def classify(
-            self, inp: DistillInput, hint: ClassifierResult
-        ) -> ClassifierResult | None:
+        def classify(self, inp: DistillInput, hint: ClassifierResult) -> ClassifierResult | None:
             raise RuntimeError("LLM unavailable")
 
     inp = _inp("Please send me the report " + "x " * 200)
     result = classify_with_routing(inp, llm_provider=BrokenProvider())
     # Exception caught → fall back to heuristics
     assert result.task_class in TaskClass.__members__.values()
+
+
+def test_routing_budget_cap_uses_heuristics_and_records_fallback(tmp_path: Path) -> None:
+    from lark_to_notes.budget import FallbackReason, record_usage
+
+    class NeverCalledProvider:
+        model = "gpt-4o-mini"
+
+        def classify(self, inp: DistillInput, hint: ClassifierResult) -> ClassifierResult | None:
+            raise AssertionError("provider should not be called when budget is exhausted")
+
+    conn = _budget_conn(tmp_path)
+    record_usage(
+        conn,
+        {
+            "call_id": "prior-llm-call",
+            "provider": "copilot",
+            "model": "gpt-4o-mini",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "duration_ms": 10,
+            "cached": 0,
+            "fallback": 0,
+            "fallback_reason": FallbackReason.NOT_APPLICABLE,
+            "run_id": "run-cap",
+            "source_id": "dm:test",
+            "created_at": "2026-04-14T10:00:00Z",
+        },
+    )
+    enforcer = BudgetEnforcer(conn, BudgetPolicy(max_llm_calls_per_run=1))
+
+    result = classify_with_routing(
+        _inp("context context context " * 40),
+        llm_provider=NeverCalledProvider(),
+        budget_enforcer=enforcer,
+        run_id="run-cap",
+    )
+
+    snap = enforcer.get_run_snapshot("run-cap")
+    assert result.task_class == TaskClass.NEEDS_REVIEW
+    assert result.reason_code.startswith("budget_fallback_")
+    assert snap.call_count == 2
+    assert snap.fallback_count == 1
+
+
+def test_routing_budget_cache_hit_reuses_cached_result(tmp_path: Path) -> None:
+    class CachedProvider:
+        model = "gpt-4o-mini"
+        calls = 0
+
+        def classify(self, inp: DistillInput, hint: ClassifierResult) -> ClassifierResult | None:
+            self.calls += 1
+            return ClassifierResult(
+                task_class=TaskClass.TASK,
+                confidence_band=ConfidenceBand.HIGH,
+                promotion_rec=PromotionRec.CURRENT_TASKS,
+                reason_code="llm_override",
+            )
+
+    conn = _budget_conn(tmp_path)
+    enforcer = BudgetEnforcer(conn, BudgetPolicy(cache_ttl_seconds=3600))
+    provider = CachedProvider()
+    inp = _inp("This is long " * 100)
+
+    first = classify_with_routing(
+        inp,
+        llm_provider=provider,
+        budget_enforcer=enforcer,
+        run_id="run-cache",
+    )
+    second = classify_with_routing(
+        inp,
+        llm_provider=provider,
+        budget_enforcer=enforcer,
+        run_id="run-cache",
+    )
+
+    snap = enforcer.get_run_snapshot("run-cache")
+    assert first.reason_code == "llm_override"
+    assert second.reason_code == "llm_override"
+    assert provider.calls == 1
+    assert snap.call_count == 2
+    assert snap.cached_count == 1
+
+
+def test_routing_budget_latency_spike_falls_back(tmp_path: Path) -> None:
+    class SlowProvider:
+        model = "gpt-4o-mini"
+
+        def classify(self, inp: DistillInput, hint: ClassifierResult) -> ClassifierResult | None:
+            time.sleep(0.02)
+            return ClassifierResult(
+                task_class=TaskClass.TASK,
+                confidence_band=ConfidenceBand.HIGH,
+                promotion_rec=PromotionRec.CURRENT_TASKS,
+                reason_code="llm_override",
+            )
+
+    conn = _budget_conn(tmp_path)
+    enforcer = BudgetEnforcer(conn, BudgetPolicy(max_latency_ms=1))
+
+    result = classify_with_routing(
+        _inp("context context context " * 40),
+        llm_provider=SlowProvider(),
+        budget_enforcer=enforcer,
+        run_id="run-latency",
+    )
+
+    snap = enforcer.get_run_snapshot("run-latency")
+    assert result.task_class == TaskClass.NEEDS_REVIEW
+    assert result.reason_code.startswith("latency_spike_")
+    assert snap.call_count == 1
+    assert snap.fallback_count == 1
+
+
+# ---------------------------------------------------------------------------
+# lw-tst.4: routing.py gap tests — explicit fast-path and provider-skip tests
+# ---------------------------------------------------------------------------
+
+
+class TestRoutingGaps:
+    """Explicit tests for routing.py paths not covered by existing tests."""
+
+    def test_fast_path_skips_provider_when_escalate_false(self) -> None:
+        """Provider must NOT be called when escalate_to_llm=False from heuristic."""
+        from lark_to_notes.distill.routing import LLMProvider
+
+        class BombProvider:
+            """Raises AssertionError if ever called."""
+
+            model = "bomb"
+
+            def classify(
+                self, inp: DistillInput, hint: ClassifierResult
+            ) -> ClassifierResult | None:
+                raise AssertionError("fast-path: provider must not be called")
+
+        assert isinstance(BombProvider(), LLMProvider)
+        # Short, high-confidence message -> HIGH band, escalate_to_llm=False
+        result = classify_with_routing(
+            _inp("Please send me the report"),
+            llm_provider=BombProvider(),
+        )
+        # No AssertionError raised -> provider was not called
+        assert result.escalate_to_llm is False
+
+    def test_custom_classifier_overrides_default(self) -> None:
+        """A custom HeuristicClassifier instance controls the classification result."""
+        known_result = ClassifierResult(
+            task_class=TaskClass.FOLLOW_UP,
+            confidence_band=ConfidenceBand.MEDIUM,
+            promotion_rec=PromotionRec.DAILY_ONLY,
+            reason_code="custom_known_result",
+            escalate_to_llm=False,
+        )
+
+        class FixedClassifier:
+            def classify(self, inp: DistillInput) -> ClassifierResult:
+                return known_result
+
+        result = classify_with_routing(
+            _inp("anything here"),
+            classifier=FixedClassifier(),  # type: ignore[arg-type]
+        )
+        assert result.reason_code == "custom_known_result"
+        assert result.task_class == TaskClass.FOLLOW_UP
+
+    def test_provider_call_count_is_zero_when_fast_path(self) -> None:
+        """Call counter confirms provider is never invoked on the fast path."""
+
+        class CountingProvider:
+            model = "gpt-4o"
+            call_count: int = 0
+
+            def classify(
+                self, inp: DistillInput, hint: ClassifierResult
+            ) -> ClassifierResult | None:
+                self.call_count += 1
+                return None
+
+        provider = CountingProvider()
+        # Short, high-confidence message -> escalate_to_llm=False -> fast path
+        classify_with_routing(_inp("Send the budget to Alice"), llm_provider=provider)
+        assert provider.call_count == 0
+
+    def test_llm_returns_none_low_confidence_reason_code_has_llm_fallback_prefix(
+        self,
+    ) -> None:
+        """LLM returning None on LOW-confidence input prefixes reason_code with 'llm_fallback_'."""
+
+        class NullProvider:
+            model = "null"
+
+            def classify(
+                self, inp: DistillInput, hint: ClassifierResult
+            ) -> ClassifierResult | None:
+                return None
+
+        # Long content with no signal -> LOW confidence, escalate_to_llm=True
+        long_no_signal = "context context context " * 40
+        result = classify_with_routing(_inp(long_no_signal), llm_provider=NullProvider())
+        assert result.reason_code.startswith("llm_fallback_")
+
+    def test_no_provider_low_confidence_reason_code_has_no_provider_prefix(self) -> None:
+        """No provider + LOW confidence input prefixes reason_code with 'no_provider_'."""
+        long_no_signal = "context context context " * 40
+        result = classify_with_routing(_inp(long_no_signal), llm_provider=None)
+        assert result.reason_code.startswith("no_provider_")
