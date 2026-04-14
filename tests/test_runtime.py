@@ -19,11 +19,16 @@ import sqlite3
 import threading
 import time
 from collections.abc import Generator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from lark_to_notes.runtime.executor import execute_reconcile_run, execute_work_batch
+from lark_to_notes.runtime.executor import (
+    execute_reconcile_run,
+    execute_work_batch,
+    run_background_runtime,
+)
 from lark_to_notes.runtime.lock import RuntimeLock
 from lark_to_notes.runtime.models import (
     BatchRunResult,
@@ -32,6 +37,7 @@ from lark_to_notes.runtime.models import (
     ReconcileReport,
     ReconcileRunResult,
     RunStatus,
+    RuntimeDaemonResult,
     RuntimeRun,
     RuntimeWorkItem,
 )
@@ -284,8 +290,10 @@ class TestHealthReport:
         assert report.run_count_failed == 0
         assert report.run_count_running == 0
         assert report.dead_letter_count == 0
+        assert report.queue_depth == 0
         assert report.error_rate == pytest.approx(0.0)
         assert report.last_run_at is None
+        assert report.lag_seconds is None
 
     def test_health_counts_runs(self, conn) -> None:  # type: ignore[no-untyped-def]
         r1 = start_run(conn, "sync")
@@ -328,6 +336,26 @@ class TestHealthReport:
     def test_health_return_type(self, conn) -> None:  # type: ignore[no-untyped-def]
         report = health_report(conn)
         assert isinstance(report, HealthReport)
+
+    def test_health_queue_metrics(self, conn: sqlite3.Connection) -> None:
+        report = health_report(
+            conn,
+            queued_items=(
+                RuntimeWorkItem(
+                    source_id="src-001",
+                    item_key="item-1",
+                    queued_at="2024-01-01T00:00:00Z",
+                ),
+                RuntimeWorkItem(
+                    source_id="src-001",
+                    item_key="item-2",
+                    queued_at="2024-01-01T00:05:00Z",
+                ),
+            ),
+            now=datetime(2024, 1, 1, 0, 10, tzinfo=UTC),
+        )
+        assert report.queue_depth == 2
+        assert report.lag_seconds == pytest.approx(600.0)
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +777,46 @@ class TestRuntimeExecutor:
         assert result.run.items_failed == 1
         assert result.report.repairs_failed == 1
 
+    def test_run_background_runtime_drains_batches(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        batches = [
+            [
+                RuntimeWorkItem(source_id="src-001", item_key="item-1"),
+                RuntimeWorkItem(source_id="src-001", item_key="item-2"),
+            ],
+            [],
+        ]
+        seen: list[str] = []
+        sleeps: list[float] = []
+
+        def fetch_batch() -> list[RuntimeWorkItem]:
+            return batches.pop(0)
+
+        def processor(item: RuntimeWorkItem) -> None:
+            seen.append(item.item_key)
+
+        result = run_background_runtime(
+            conn,
+            command="sync-daemon",
+            fetch_batch=fetch_batch,
+            processor=processor,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=sleeps.append,
+            poll_interval_s=0.25,
+            stop_when_idle=True,
+        )
+
+        assert seen == ["item-1", "item-2"]
+        assert result.cycle_count == 2
+        assert result.idle_cycles == 1
+        assert result.items_seen == 2
+        assert result.items_processed == 2
+        assert result.items_failed == 0
+        assert result.queue_depth_peak == 2
+        assert len(result.run_ids) == 1
+        assert sleeps == [0.25]
+
 
 # ---------------------------------------------------------------------------
 # Models — basic dataclass construction
@@ -786,7 +854,9 @@ class TestModels:
             run_count_failed=1,
             run_count_running=0,
             dead_letter_count=2,
+            queue_depth=1,
             error_rate=0.1,
+            lag_seconds=30.0,
         )
         assert report.last_run_at is None
         assert report.last_run_command is None
@@ -804,6 +874,7 @@ class TestModels:
     def test_runtime_work_item_defaults(self) -> None:
         item = RuntimeWorkItem(source_id="src-001", item_key="item-1")
         assert item.raw_message_id is None
+        assert item.queued_at is None
         assert item.payload is None
 
     def test_batch_run_result_construction(self) -> None:
@@ -843,3 +914,261 @@ class TestModels:
         )
         result = ReconcileRunResult(run=run, report=report)
         assert result.run.command == "reconcile"
+
+    def test_runtime_daemon_result_construction(self) -> None:
+        result = RuntimeDaemonResult(
+            cycle_count=2,
+            idle_cycles=1,
+            items_seen=3,
+            items_processed=2,
+            items_failed=1,
+            queue_depth_peak=2,
+            run_ids=("run-1",),
+        )
+        assert result.run_ids == ("run-1",)
+
+
+# ---------------------------------------------------------------------------
+# run_background_runtime (continuous daemon loop)
+# ---------------------------------------------------------------------------
+
+
+class TestRunBackgroundRuntime:
+    """Behavioral tests for run_background_runtime (the daemon scheduling loop).
+
+    All tests use real SQLite, real tmp_path for lock_path, and
+    sleep_fn=lambda _: None to avoid actual sleeping.
+    """
+
+    def _make_item(self, key: str = "item-1", source: str = "src-001") -> RuntimeWorkItem:
+        return RuntimeWorkItem(source_id=source, item_key=key)
+
+    def test_daemon_stops_when_idle(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """Empty first batch with stop_when_idle=True exits after exactly 1 cycle."""
+
+        result = run_background_runtime(
+            conn,
+            command="daemon",
+            fetch_batch=lambda: [],
+            processor=lambda _item: None,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _: None,
+            stop_when_idle=True,
+        )
+
+        assert result.cycle_count == 1
+        assert result.idle_cycles == 1
+        assert result.items_seen == 0
+        assert result.items_processed == 0
+        assert result.queue_depth_peak == 0
+        assert result.run_ids == ()
+
+    def test_daemon_runs_max_cycles(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """max_cycles=3 with non-empty batches executes exactly 3 cycles."""
+        item = self._make_item()
+        cycles: list[int] = []
+
+        def fetch() -> list[RuntimeWorkItem]:
+            cycles.append(1)
+            return [item]
+
+        result = run_background_runtime(
+            conn,
+            command="daemon",
+            fetch_batch=fetch,
+            processor=lambda _item: None,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _: None,
+            max_cycles=3,
+        )
+
+        assert result.cycle_count == 3
+        assert len(cycles) == 3
+        assert result.idle_cycles == 0
+
+    def test_daemon_accumulates_metrics(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """items_seen and items_processed accumulate across cycles."""
+        # cycle 1: 2 items, cycle 2: 1 item, cycle 3: empty -> stop
+        batch_plan = [[self._make_item("a"), self._make_item("b")], [self._make_item("c")], []]
+        idx = 0
+
+        def fetch() -> list[RuntimeWorkItem]:
+            nonlocal idx
+            batch = batch_plan[idx]
+            idx += 1
+            return batch
+
+        result = run_background_runtime(
+            conn,
+            command="daemon",
+            fetch_batch=fetch,
+            processor=lambda _item: None,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _: None,
+            stop_when_idle=True,
+        )
+
+        assert result.cycle_count == 3
+        assert result.idle_cycles == 1
+        assert result.items_seen == 3
+        assert result.items_processed == 3
+        assert result.items_failed == 0
+
+    def test_daemon_poll_sleep_between_cycles(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """Sleep is called between non-empty cycles but NOT after the last one."""
+        item = self._make_item()
+        sleep_calls: list[float] = []
+
+        result = run_background_runtime(
+            conn,
+            command="daemon",
+            fetch_batch=lambda: [item],
+            processor=lambda _item: None,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=sleep_calls.append,
+            poll_interval_s=1.5,
+            max_cycles=3,
+        )
+
+        # 3 cycles: sleep after cycle 1 and 2, NOT after cycle 3 (last)
+        assert result.cycle_count == 3
+        assert len(sleep_calls) == 2
+        assert all(s == 1.5 for s in sleep_calls)
+
+    def test_daemon_idle_sleep_on_empty_batch(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """Empty batches trigger a sleep call (poll interval); non-empty do not on last cycle."""
+        # Alternating: empty, non-empty, empty, non-empty (stop at max_cycles=4)
+        batches = [[], [self._make_item()], [], [self._make_item()]]
+        idx = 0
+        sleep_calls: list[float] = []
+
+        def fetch() -> list[RuntimeWorkItem]:
+            nonlocal idx
+            b = batches[idx]
+            idx += 1
+            return b
+
+        result = run_background_runtime(
+            conn,
+            command="daemon",
+            fetch_batch=fetch,
+            processor=lambda _item: None,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=sleep_calls.append,
+            poll_interval_s=2.0,
+            max_cycles=4,
+            stop_when_idle=False,
+        )
+
+        # cycle 1 (empty): sleep; cycle 2 (non-empty, not last): sleep
+        # cycle 3 (empty): sleep; cycle 4 (non-empty, IS last): NO sleep
+        assert result.cycle_count == 4
+        assert result.idle_cycles == 2
+        assert len(sleep_calls) == 3
+        assert all(s == 2.0 for s in sleep_calls)
+
+    def test_daemon_quarantines_failed_items(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """Items whose processor raises are quarantined in the dead-letter store."""
+        item = RuntimeWorkItem(
+            source_id="src-001", item_key="bad-item", raw_message_id="msg-bad"
+        )
+
+        def boom(_item: RuntimeWorkItem) -> None:
+            raise PermanentError("bad payload")
+
+        result = run_background_runtime(
+            conn,
+            command="daemon",
+            fetch_batch=lambda: [item],
+            processor=boom,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _: None,
+            max_cycles=1,
+        )
+
+        dead = list_dead_letters(conn)
+        assert result.items_failed == 1
+        assert result.items_processed == 0
+        assert len(dead) == 1
+        assert dead[0].raw_message_id == "msg-bad"
+
+    def test_daemon_queue_depth_peak_across_cycles(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """queue_depth_peak tracks the largest batch seen across all cycles."""
+        batches = [
+            [self._make_item(f"i{i}") for i in range(5)],  # 5 items
+            [self._make_item(f"j{i}") for i in range(2)],  # 2 items
+        ]
+        idx = 0
+
+        def fetch() -> list[RuntimeWorkItem]:
+            nonlocal idx
+            b = batches[idx]
+            idx += 1
+            return b
+
+        result = run_background_runtime(
+            conn,
+            command="daemon",
+            fetch_batch=fetch,
+            processor=lambda _item: None,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _: None,
+            max_cycles=2,
+        )
+
+        assert result.queue_depth_peak == 5
+
+    def test_daemon_run_ids_populated(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """Each non-empty cycle appends a valid UUID run_id to run_ids."""
+        import uuid
+
+        item = self._make_item()
+
+        result = run_background_runtime(
+            conn,
+            command="daemon",
+            fetch_batch=lambda: [item],
+            processor=lambda _item: None,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _: None,
+            max_cycles=3,
+        )
+
+        assert len(result.run_ids) == 3
+        for run_id in result.run_ids:
+            uuid.UUID(run_id)  # raises ValueError if not a valid UUID
+
+    def test_daemon_stop_when_idle_false_max_cycles(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """stop_when_idle=False with all-empty batches still stops at max_cycles."""
+        result = run_background_runtime(
+            conn,
+            command="daemon",
+            fetch_batch=lambda: [],
+            processor=lambda _item: None,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _: None,
+            max_cycles=2,
+            stop_when_idle=False,
+        )
+
+        assert result.cycle_count == 2
+        assert result.idle_cycles == 2
+        assert result.items_seen == 0
