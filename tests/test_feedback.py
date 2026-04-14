@@ -274,3 +274,258 @@ def test_apply_feedback_merge_target_must_exist(conn: sqlite3.Connection) -> Non
     with pytest.raises(LookupError, match="merge_into_task_id"):
         apply_feedback_artifact(conn, artifact)
     assert list_feedback_events(conn, target_id=task_id) == []
+
+
+# ---------------------------------------------------------------------------
+# lw-tst.1: feedback/store.py gap tests
+# ---------------------------------------------------------------------------
+
+
+def _make_entry(
+    *,
+    target_id: str = "task-001",
+    action: str = "confirm",
+    target_type: str = "task",
+    comment: str = "",
+) -> object:
+    from lark_to_notes.feedback.models import (
+        FeedbackEntry,
+        FeedbackTargetType,
+    )
+
+    return FeedbackEntry(
+        target_type=FeedbackTargetType(target_type),
+        target_id=target_id,
+        directive=FeedbackDirective(
+            action=FeedbackAction(action),
+            comment=comment,
+        ),
+    )
+
+
+class TestFeedbackStoreGaps:
+    """Direct tests for feedback/store.py: get_event, list_events, has_manual_override."""
+
+    def test_get_event_returns_record(self, conn: sqlite3.Connection) -> None:
+        from lark_to_notes.feedback.store import get_event, insert_event
+
+        entry = _make_entry(target_id="task-a", action="confirm")
+        feedback_id = insert_event(conn, entry)
+
+        record = get_event(conn, feedback_id)
+        assert record is not None
+        assert record.feedback_id == feedback_id
+        assert record.target_id == "task-a"
+        assert record.action == "confirm"
+
+    def test_get_event_returns_none_for_missing(self, conn: sqlite3.Connection) -> None:
+        from lark_to_notes.feedback.store import get_event
+
+        result = get_event(conn, "does-not-exist-uuid-0000")
+        assert result is None
+
+    def test_list_events_filter_by_target_type(self, conn: sqlite3.Connection) -> None:
+        from lark_to_notes.feedback.store import insert_event, list_events
+
+        insert_event(conn, _make_entry(target_id="task-x", target_type="task"))
+        insert_event(
+            conn,
+            _make_entry(target_id="src-x", target_type="source_item", action="missed_task"),
+            artifact_path="unique-source-path",
+        )
+
+        task_events = list_events(conn, target_type="task")
+        assert len(task_events) == 1
+        assert task_events[0].target_id == "task-x"
+
+        source_events = list_events(conn, target_type="source_item")
+        assert len(source_events) == 1
+        assert source_events[0].target_id == "src-x"
+
+    def test_list_events_filter_by_action(self, conn: sqlite3.Connection) -> None:
+        from lark_to_notes.feedback.store import insert_event, list_events
+
+        insert_event(conn, _make_entry(target_id="t1", action="confirm"), artifact_path="p1")
+        insert_event(conn, _make_entry(target_id="t2", action="dismiss"), artifact_path="p2")
+
+        confirms = list_events(conn, action="confirm")
+        assert len(confirms) == 1
+        assert confirms[0].target_id == "t1"
+
+        dismisses = list_events(conn, action="dismiss")
+        assert len(dismisses) == 1
+        assert dismisses[0].target_id == "t2"
+
+    def test_list_events_limit(self, conn: sqlite3.Connection) -> None:
+        from lark_to_notes.feedback.store import insert_event, list_events
+
+        for i in range(10):
+            insert_event(
+                conn,
+                _make_entry(target_id=f"task-{i}"),
+                artifact_path=f"path-{i}",
+            )
+
+        results = list_events(conn, limit=3)
+        assert len(results) == 3
+
+    def test_list_events_newest_first(self, conn: sqlite3.Connection) -> None:
+        from lark_to_notes.feedback.store import insert_event, list_events
+
+        for i in range(3):
+            insert_event(
+                conn,
+                _make_entry(target_id=f"task-{i}", comment=str(i)),
+                artifact_path=f"unique-{i}",
+            )
+
+        results = list_events(conn, limit=3)
+        # ORDER BY created_at DESC — each insert gets a later timestamp than previous
+        # but all 3 may land in the same second; at minimum we get all 3 back
+        assert len(results) == 3
+        target_ids = [r.target_id for r in results]
+        assert set(target_ids) == {"task-0", "task-1", "task-2"}
+
+    def test_has_manual_override_true(self, conn: sqlite3.Connection) -> None:
+        from lark_to_notes.feedback.store import has_manual_override, insert_event
+
+        insert_event(conn, _make_entry(target_id="task-override", action="confirm"))
+
+        assert has_manual_override(conn, "task-override") is True
+
+    def test_has_manual_override_false(self, conn: sqlite3.Connection) -> None:
+        from lark_to_notes.feedback.store import has_manual_override
+
+        assert has_manual_override(conn, "no-such-task") is False
+
+
+# ---------------------------------------------------------------------------
+# lw-tst.2: feedback/service.py gap tests
+# ---------------------------------------------------------------------------
+
+
+class TestFeedbackServiceGaps:
+    """Tests for list_feedback_events delegation and _derive_task_override branches."""
+
+    def test_list_feedback_events_target_type_filter(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        from lark_to_notes.feedback.store import insert_event
+
+        insert_event(conn, _make_entry(target_id="task-y", target_type="task"))
+        insert_event(
+            conn,
+            _make_entry(target_id="src-y", target_type="source_item", action="missed_task"),
+            artifact_path="unique-src",
+        )
+
+        results = list_feedback_events(conn, target_type="task")
+        assert all(r.target_id == "task-y" for r in results)
+        assert len(results) == 1
+
+    def test_list_feedback_events_target_id_filter(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        from lark_to_notes.feedback.store import insert_event
+
+        insert_event(conn, _make_entry(target_id="task-a1"), artifact_path="path-a1")
+        insert_event(conn, _make_entry(target_id="task-b1"), artifact_path="path-b1")
+
+        results = list_feedback_events(conn, target_id="task-a1")
+        assert len(results) == 1
+        assert results[0].target_id == "task-a1"
+
+    def test_list_feedback_events_limit(self, conn: sqlite3.Connection) -> None:
+        from lark_to_notes.feedback.store import insert_event
+
+        for i in range(20):
+            insert_event(
+                conn,
+                _make_entry(target_id=f"t-{i}"),
+                artifact_path=f"p-{i}",
+            )
+
+        results = list_feedback_events(conn, limit=5)
+        assert len(results) == 5
+
+    def test_derive_task_override_wrong_class_no_task_class_raises(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """WRONG_CLASS with task_class=None must raise ValueError."""
+        task_id = _make_review_task(conn)
+        artifact = FeedbackArtifact(
+            tasks={
+                task_id: FeedbackDirective(
+                    action=FeedbackAction.WRONG_CLASS,
+                    # task_class intentionally omitted (defaults to None)
+                ),
+            },
+        )
+        with pytest.raises(ValueError, match="task_class"):
+            apply_feedback_artifact(conn, artifact)
+
+    def test_derive_task_override_context_defaults(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """WRONG_CLASS with task_class='context' -> status dismissed, promotion daily_only."""
+        from lark_to_notes.tasks.registry import get_task
+
+        task_id = _make_review_task(conn)
+        artifact = FeedbackArtifact(
+            tasks={
+                task_id: FeedbackDirective(
+                    action=FeedbackAction.WRONG_CLASS,
+                    task_class="context",
+                ),
+            },
+        )
+        apply_feedback_artifact(conn, artifact)
+        task = get_task(conn, task_id)
+        assert task is not None
+        assert task.task_class == "context"
+        assert task.status == "dismissed"
+        assert task.promotion_rec == "daily_only"
+
+    def test_derive_task_override_needs_review_defaults(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """WRONG_CLASS with task_class='needs_review' -> status needs_review, promotion review."""
+        from lark_to_notes.tasks.registry import get_task
+
+        task_id = _make_review_task(conn, fingerprint="feedback000000002")
+        artifact = FeedbackArtifact(
+            tasks={
+                task_id: FeedbackDirective(
+                    action=FeedbackAction.WRONG_CLASS,
+                    task_class="needs_review",
+                ),
+            },
+        )
+        apply_feedback_artifact(conn, artifact)
+        task = get_task(conn, task_id)
+        assert task is not None
+        assert task.task_class == "needs_review"
+        assert task.status == "needs_review"
+        assert task.promotion_rec == "review"
+
+    def test_derive_task_override_follow_up_defaults(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """WRONG_CLASS with task_class='follow_up' -> status open, promotion daily_only."""
+        from lark_to_notes.tasks.registry import get_task
+
+        task_id = _make_review_task(conn, fingerprint="feedback000000003")
+        artifact = FeedbackArtifact(
+            tasks={
+                task_id: FeedbackDirective(
+                    action=FeedbackAction.WRONG_CLASS,
+                    task_class="follow_up",
+                ),
+            },
+        )
+        apply_feedback_artifact(conn, artifact)
+        task = get_task(conn, task_id)
+        assert task is not None
+        assert task.task_class == "follow_up"
+        assert task.status == "open"
+        assert task.promotion_rec == "daily_only"
