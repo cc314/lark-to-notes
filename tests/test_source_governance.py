@@ -117,7 +117,7 @@ def test_checkpoint_from_row_roundtrip() -> None:
 
 
 def test_schema_version_constant() -> None:
-    assert SCHEMA_VERSION == 1
+    assert max(all_versions()) == SCHEMA_VERSION
 
 
 def test_all_versions_returns_sorted_list() -> None:

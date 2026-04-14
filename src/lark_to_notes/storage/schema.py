@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -46,8 +46,51 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 );
 """
 
+# ---------------------------------------------------------------------------
+# Version 2 — raw-capture ledger and intake-run audit log
+# ---------------------------------------------------------------------------
+
+_V2_DDL = """
+CREATE TABLE IF NOT EXISTS raw_messages (
+    message_id   TEXT PRIMARY KEY,
+    source_id    TEXT NOT NULL,
+    source_type  TEXT NOT NULL,
+    chat_id      TEXT NOT NULL,
+    chat_type    TEXT NOT NULL DEFAULT '',
+    sender_id    TEXT NOT NULL DEFAULT '',
+    sender_name  TEXT NOT NULL DEFAULT '',
+    direction    TEXT NOT NULL DEFAULT 'incoming',
+    created_at   TEXT NOT NULL,
+    content      TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    ingested_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_messages_source_id
+    ON raw_messages (source_id);
+
+CREATE INDEX IF NOT EXISTS idx_raw_messages_created_at
+    ON raw_messages (created_at);
+
+CREATE TABLE IF NOT EXISTS intake_runs (
+    run_id           TEXT PRIMARY KEY,
+    source_id        TEXT NOT NULL,
+    started_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    finished_at      TEXT,
+    messages_fetched INTEGER NOT NULL DEFAULT 0,
+    messages_new     INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL DEFAULT 'running'
+                         CHECK(status IN ('running', 'done', 'error')),
+    error_detail     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_intake_runs_source_id
+    ON intake_runs (source_id);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
+    2: _V2_DDL,
 }
 
 
