@@ -123,3 +123,53 @@ class ReconcileReport:
     repairs_succeeded: int
     repairs_failed: int
     gap_details: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeWorkItem:
+    """A unit of runtime-managed work.
+
+    Attributes:
+        source_id:       Stable watched-source identifier used for quarantine
+                         and diagnostics.
+        item_key:        Stable identifier for the work item within the batch.
+        raw_message_id:  Optional raw-message identifier when the work item
+                         comes from the intake ledger.
+        payload:         Optional opaque value passed through to the processor.
+    """
+
+    source_id: str
+    item_key: str
+    raw_message_id: str | None = None
+    payload: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchRunResult:
+    """Summary of a serialized batch run.
+
+    Attributes:
+        run:               Final persisted runtime-run record.
+        items_total:       Number of work items seen in the batch.
+        items_processed:   Number of items completed successfully.
+        items_failed:      Number of items that ended up quarantined.
+        retry_count:       Total retry attempts consumed across the batch.
+        queue_depth_peak:  Largest outstanding queue depth observed.
+        dead_letter_ids:   Dead-letter IDs created during the run.
+    """
+
+    run: RuntimeRun
+    items_total: int
+    items_processed: int
+    items_failed: int
+    retry_count: int
+    queue_depth_peak: int
+    dead_letter_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileRunResult:
+    """Result of a reconciliation pass that was recorded as a runtime run."""
+
+    run: RuntimeRun
+    report: ReconcileReport

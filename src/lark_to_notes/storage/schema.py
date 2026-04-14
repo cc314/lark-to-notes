@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -177,11 +177,39 @@ CREATE INDEX IF NOT EXISTS idx_dead_letters_quarantined_at
     ON dead_letters (quarantined_at);
 """
 
+# ---------------------------------------------------------------------------
+# Version 5 — structured feedback events and review artifact imports
+# ---------------------------------------------------------------------------
+
+_V5_DDL = """
+CREATE TABLE IF NOT EXISTS feedback_events (
+    feedback_id    TEXT PRIMARY KEY,
+    target_type    TEXT NOT NULL CHECK(target_type IN ('task', 'source_item')),
+    target_id      TEXT NOT NULL,
+    action         TEXT NOT NULL CHECK(action IN (
+                        'confirm', 'dismiss', 'merge', 'snooze',
+                        'wrong_class', 'missed_task'
+                    )),
+    payload_json   TEXT NOT NULL DEFAULT '{}',
+    comment        TEXT NOT NULL DEFAULT '',
+    actor_ref      TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    artifact_path  TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_events_target
+    ON feedback_events (target_type, target_id);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_events_created_at
+    ON feedback_events (created_at);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
     3: _V3_DDL,
     4: _V4_DDL,
+    5: _V5_DDL,
 }
 
 

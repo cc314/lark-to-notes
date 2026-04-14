@@ -146,6 +146,7 @@ def test_init_db_creates_tables() -> None:
     assert "watched_sources" in tables
     assert "checkpoints" in tables
     assert "schema_versions" in tables
+    assert "feedback_events" in tables
 
 
 def test_init_db_is_idempotent() -> None:

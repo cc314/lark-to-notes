@@ -22,6 +22,7 @@ import sqlite3
 import uuid
 from datetime import UTC, datetime
 
+from lark_to_notes.distill.models import PromotionRec, TaskClass
 from lark_to_notes.tasks.models import TaskEvidence, TaskRecord, TaskStatus
 
 # Status string used when a new task has low confidence
@@ -114,15 +115,11 @@ def get_task(conn: sqlite3.Connection, task_id: str) -> TaskRecord | None:
         A :class:`TaskRecord` or ``None``.
     """
     conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
     return TaskRecord.from_db_row(row) if row else None
 
 
-def get_task_by_fingerprint(
-    conn: sqlite3.Connection, fingerprint: str
-) -> TaskRecord | None:
+def get_task_by_fingerprint(conn: sqlite3.Connection, fingerprint: str) -> TaskRecord | None:
     """Return the task matching *fingerprint*, or ``None``.
 
     Args:
@@ -133,9 +130,7 @@ def get_task_by_fingerprint(
         A :class:`TaskRecord` or ``None``.
     """
     conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT * FROM tasks WHERE fingerprint = ?", (fingerprint,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM tasks WHERE fingerprint = ?", (fingerprint,)).fetchone()
     return TaskRecord.from_db_row(row) if row else None
 
 
@@ -197,9 +192,7 @@ def update_task_status(
 
     if not force:
         conn.row_factory = sqlite3.Row
-        current = conn.execute(
-            "SELECT status FROM tasks WHERE task_id = ?", (task_id,)
-        ).fetchone()
+        current = conn.execute("SELECT status FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
         if current is None:
             return False
         if TaskStatus(current["status"]).is_terminal:
@@ -209,6 +202,91 @@ def update_task_status(
     result = conn.execute(
         "UPDATE tasks SET status = ?, last_updated_at = ? WHERE task_id = ?",
         (new_status, now, task_id),
+    )
+    return result.rowcount > 0
+
+
+def apply_task_override(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    action: str,
+    artifact_path: str = "",
+    comment: str = "",
+    actor_ref: str = "",
+    status: str | None = None,
+    task_class: str | None = None,
+    promotion_rec: str | None = None,
+    title: str | None = None,
+    summary: str | None = None,
+    due_at: str | None = None,
+    merge_into_task_id: str | None = None,
+) -> bool:
+    """Apply a manual operator override to a task row.
+
+    The effective override is stored in ``manual_override_state`` while the
+    concrete task fields are updated in place so replay keeps honoring the
+    operator's decision.
+    """
+    if get_task(conn, task_id) is None:
+        return False
+    if status is not None:
+        TaskStatus(status)
+    if task_class is not None:
+        TaskClass(task_class)
+    if promotion_rec is not None:
+        PromotionRec(promotion_rec)
+    if merge_into_task_id is not None and merge_into_task_id == task_id:
+        raise ValueError("merge_into_task_id must refer to a different task")
+    if merge_into_task_id is not None and get_task(conn, merge_into_task_id) is None:
+        raise LookupError(f"merge_into_task_id {merge_into_task_id!r} was not found")
+
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    override_fields: dict[str, object] = {
+        "action": action,
+        "artifact_path": artifact_path,
+        "comment": comment,
+        "actor_ref": actor_ref,
+        "applied_at": now,
+        "overrides": {
+            key: value
+            for key, value in {
+                "status": status,
+                "task_class": task_class,
+                "promotion_rec": promotion_rec,
+                "title": title,
+                "summary": summary,
+                "due_at": due_at,
+                "merge_into_task_id": merge_into_task_id,
+            }.items()
+            if value is not None
+        },
+    }
+
+    result = conn.execute(
+        """
+        UPDATE tasks
+        SET manual_override_state = ?,
+            last_updated_at = ?,
+            status = COALESCE(?, status),
+            task_class = COALESCE(?, task_class),
+            promotion_rec = COALESCE(?, promotion_rec),
+            title = COALESCE(?, title),
+            summary = COALESCE(?, summary),
+            due_at = COALESCE(?, due_at)
+        WHERE task_id = ?
+        """,
+        (
+            json.dumps(override_fields, sort_keys=True),
+            now,
+            status,
+            task_class,
+            promotion_rec,
+            title,
+            summary,
+            due_at,
+            task_id,
+        ),
     )
     return result.rowcount > 0
 

@@ -1,31 +1,39 @@
 """Tests for the lark_to_notes.runtime package.
 
 Coverage:
- - schema v4: runtime_runs and dead_letters tables created by init_db
+ - schema v5: runtime_runs and dead_letters tables created by init_db
  - registry: start_run, finish_run, cancel_run, get_run, list_runs,
    quarantine_item, list_dead_letters, health_report
  - retry: RetryPolicy.should_retry, delay_for, PermanentError short-circuit
  - lock: RuntimeLock acquire/release via context manager, is_held, idempotent release
  - reconcile: reconcile_cursors gap detection, repair callback, up-to-date sources,
    missing checkpoints, repair failures
+ - executor: serialized batch execution, retry/quarantine orchestration,
+   reconciliation run tracking
  - models: dataclass construction and field defaults
 """
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
 
+from lark_to_notes.runtime.executor import execute_reconcile_run, execute_work_batch
 from lark_to_notes.runtime.lock import RuntimeLock
 from lark_to_notes.runtime.models import (
+    BatchRunResult,
     DeadLetter,
     HealthReport,
     ReconcileReport,
+    ReconcileRunResult,
     RunStatus,
     RuntimeRun,
+    RuntimeWorkItem,
 )
 from lark_to_notes.runtime.reconcile import SourceState, reconcile_cursors
 from lark_to_notes.runtime.registry import (
@@ -48,7 +56,7 @@ from lark_to_notes.storage.schema import SCHEMA_VERSION
 
 
 @pytest.fixture()
-def conn():  # type: ignore[return]
+def conn() -> Generator[sqlite3.Connection, None, None]:
     """Return an in-memory SQLite connection with the full schema applied."""
     c = connect(":memory:")
     init_db(c)
@@ -57,13 +65,13 @@ def conn():  # type: ignore[return]
 
 
 # ---------------------------------------------------------------------------
-# Schema v4
+# Schema v5
 # ---------------------------------------------------------------------------
 
 
-class TestSchemaV4:
-    def test_schema_version_is_4(self) -> None:
-        assert SCHEMA_VERSION == 4
+class TestSchemaV5:
+    def test_schema_version_is_5(self) -> None:
+        assert SCHEMA_VERSION == 5
 
     def test_runtime_runs_table_exists(self, conn) -> None:  # type: ignore[no-untyped-def]
         row = conn.execute(
@@ -502,6 +510,247 @@ class TestReconcileCursors:
 
 
 # ---------------------------------------------------------------------------
+# Runtime executor
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeExecutor:
+    def test_execute_work_batch_records_completed_run(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        items = (
+            RuntimeWorkItem(source_id="src-001", item_key="item-1"),
+            RuntimeWorkItem(source_id="src-001", item_key="item-2"),
+        )
+        seen: list[str] = []
+
+        def processor(item: RuntimeWorkItem) -> None:
+            seen.append(item.item_key)
+
+        result = execute_work_batch(
+            conn,
+            command="sync",
+            items=items,
+            processor=processor,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _delay: None,
+        )
+
+        assert seen == ["item-1", "item-2"]
+        assert result.run.status == RunStatus.COMPLETED
+        assert result.items_total == 2
+        assert result.items_processed == 2
+        assert result.items_failed == 0
+        assert result.retry_count == 0
+        assert result.queue_depth_peak == 2
+        assert result.dead_letter_ids == ()
+
+    def test_execute_work_batch_retries_then_succeeds(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        item = RuntimeWorkItem(source_id="src-001", item_key="item-1")
+        attempts = 0
+        delays: list[float] = []
+
+        def processor(work_item: RuntimeWorkItem) -> None:
+            nonlocal attempts
+            assert work_item.item_key == "item-1"
+            attempts += 1
+            if attempts == 1:
+                raise ValueError("transient")
+
+        result = execute_work_batch(
+            conn,
+            command="sync",
+            items=(item,),
+            processor=processor,
+            lock_path=tmp_path / ".ltn.lock",
+            retry_policy=RetryPolicy(
+                max_attempts=3, base_delay_s=1.0, max_delay_s=1.0, jitter_factor=0.0
+            ),
+            sleep_fn=delays.append,
+        )
+
+        assert attempts == 2
+        assert delays == [1.0]
+        assert result.items_processed == 1
+        assert result.items_failed == 0
+        assert result.retry_count == 1
+        assert list_dead_letters(conn) == []
+
+    def test_execute_work_batch_quarantines_permanent_error(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        item = RuntimeWorkItem(
+            source_id="src-001",
+            item_key="item-1",
+            raw_message_id="msg-42",
+        )
+        delays: list[float] = []
+
+        def processor(_work_item: RuntimeWorkItem) -> None:
+            raise PermanentError("bad payload")
+
+        result = execute_work_batch(
+            conn,
+            command="sync",
+            items=(item,),
+            processor=processor,
+            lock_path=tmp_path / ".ltn.lock",
+            retry_policy=RetryPolicy(max_attempts=5),
+            sleep_fn=delays.append,
+        )
+
+        dead_letters = list_dead_letters(conn)
+        assert delays == []
+        assert result.items_processed == 0
+        assert result.items_failed == 1
+        assert len(result.dead_letter_ids) == 1
+        assert dead_letters[0].raw_message_id == "msg-42"
+        assert dead_letters[0].attempt_count == 1
+
+    def test_execute_work_batch_quarantines_after_retry_exhaustion(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        item = RuntimeWorkItem(source_id="src-001", item_key="item-1")
+        delays: list[float] = []
+        attempts = 0
+
+        def processor(_work_item: RuntimeWorkItem) -> None:
+            nonlocal attempts
+            attempts += 1
+            raise ValueError("still broken")
+
+        result = execute_work_batch(
+            conn,
+            command="sync",
+            items=(item,),
+            processor=processor,
+            lock_path=tmp_path / ".ltn.lock",
+            retry_policy=RetryPolicy(
+                max_attempts=3, base_delay_s=0.5, max_delay_s=0.5, jitter_factor=0.0
+            ),
+            sleep_fn=delays.append,
+        )
+
+        dead_letters = list_dead_letters(conn)
+        assert attempts == 3
+        assert delays == [0.5, 0.5]
+        assert result.retry_count == 2
+        assert dead_letters[0].attempt_count == 3
+
+    def test_execute_work_batch_marks_run_failed_on_setup_error(
+        self,
+        conn: sqlite3.Connection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def boom(self: RuntimeLock) -> None:
+            raise OSError("cannot acquire")
+
+        monkeypatch.setattr(RuntimeLock, "acquire", boom)
+
+        with pytest.raises(OSError, match="cannot acquire"):
+            execute_work_batch(
+                conn,
+                command="sync",
+                items=(RuntimeWorkItem(source_id="src-001", item_key="item-1"),),
+                processor=lambda _item: None,
+                lock_path=tmp_path / ".ltn.lock",
+                sleep_fn=lambda _delay: None,
+            )
+
+        runs = list_runs(conn, limit=1)
+        assert runs[0].status == RunStatus.FAILED
+        assert runs[0].error == "cannot acquire"
+
+    def test_execute_work_batch_serializes_across_connections(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "runtime.db"
+        init_conn = connect(db_path)
+        init_db(init_conn)
+        init_conn.close()
+        lock_path = tmp_path / ".ltn.lock"
+        intervals: list[tuple[float, float]] = []
+        intervals_lock = threading.Lock()
+
+        def worker(item_key: str) -> None:
+            conn = connect(db_path)
+            try:
+                execute_work_batch(
+                    conn,
+                    command="sync",
+                    items=(RuntimeWorkItem(source_id="src-001", item_key=item_key),),
+                    processor=lambda _item: _record_interval(intervals, intervals_lock),
+                    lock_path=lock_path,
+                    sleep_fn=lambda _delay: None,
+                )
+            finally:
+                conn.close()
+
+        def _record_interval(
+            recorded_intervals: list[tuple[float, float]],
+            recorded_intervals_lock: threading.Lock,
+        ) -> None:
+            start = time.monotonic()
+            time.sleep(0.02)
+            end = time.monotonic()
+            with recorded_intervals_lock:
+                recorded_intervals.append((start, end))
+
+        threads = [
+            threading.Thread(target=worker, args=("item-1",)),
+            threading.Thread(target=worker, args=("item-2",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert len(intervals) == 2
+        (_s1, e1), (s2, _e2) = sorted(intervals)
+        assert e1 <= s2 + 0.005
+
+    def test_execute_reconcile_run_records_runtime_history(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "INSERT INTO watched_sources (source_id, source_type, external_id, name)"
+            " VALUES ('s1', 'dm', 'ext-1', 'Source 1')"
+        )
+        conn.execute(
+            "INSERT INTO checkpoints (source_id, last_message_id, last_message_timestamp,"
+            " updated_at) VALUES ('s1', 'msg-50', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')"
+        )
+        conn.commit()
+        repaired: list[tuple[str, str | None]] = []
+
+        result = execute_reconcile_run(
+            conn,
+            {"s1": SourceState("s1", "msg-100", "2024-01-02T00:00:00Z")},
+            repair_fn=lambda source_id, cursor: repaired.append((source_id, cursor)),
+        )
+
+        assert repaired == [("s1", "msg-50")]
+        assert result.run.command == "reconcile"
+        assert result.run.status == RunStatus.COMPLETED
+        assert result.run.items_processed == 1
+        assert result.run.items_failed == 0
+        assert result.report.gaps_found == 1
+
+    def test_execute_reconcile_run_counts_failed_repairs(self, conn: sqlite3.Connection) -> None:
+        result = execute_reconcile_run(
+            conn,
+            {"s1": SourceState("s1", "msg-100", "2024-01-02T00:00:00Z")},
+            repair_fn=lambda _source_id, _cursor: (_ for _ in ()).throw(
+                RuntimeError("repair failed")
+            ),
+        )
+
+        assert result.run.status == RunStatus.COMPLETED
+        assert result.run.items_processed == 0
+        assert result.run.items_failed == 1
+        assert result.report.repairs_failed == 1
+
+
+# ---------------------------------------------------------------------------
 # Models — basic dataclass construction
 # ---------------------------------------------------------------------------
 
@@ -551,3 +800,46 @@ class TestModels:
             repairs_failed=0,
         )
         assert report.gap_details == ()
+
+    def test_runtime_work_item_defaults(self) -> None:
+        item = RuntimeWorkItem(source_id="src-001", item_key="item-1")
+        assert item.raw_message_id is None
+        assert item.payload is None
+
+    def test_batch_run_result_construction(self) -> None:
+        run = RuntimeRun(
+            run_id="r1",
+            command="sync",
+            status=RunStatus.COMPLETED,
+            started_at="2024-01-01T00:00:00Z",
+            finished_at="2024-01-01T00:01:00Z",
+            items_processed=2,
+            items_failed=1,
+        )
+        result = BatchRunResult(
+            run=run,
+            items_total=3,
+            items_processed=2,
+            items_failed=1,
+            retry_count=2,
+            queue_depth_peak=3,
+            dead_letter_ids=("dl-1",),
+        )
+        assert result.dead_letter_ids == ("dl-1",)
+
+    def test_reconcile_run_result_construction(self) -> None:
+        run = RuntimeRun(
+            run_id="r1",
+            command="reconcile",
+            status=RunStatus.COMPLETED,
+            started_at="2024-01-01T00:00:00Z",
+        )
+        report = ReconcileReport(
+            source_ids_checked=1,
+            gaps_found=0,
+            repairs_attempted=0,
+            repairs_succeeded=0,
+            repairs_failed=0,
+        )
+        result = ReconcileRunResult(run=run, report=report)
+        assert result.run.command == "reconcile"

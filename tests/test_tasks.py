@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -11,6 +12,7 @@ from lark_to_notes.tasks.fingerprint import _normalize_text, _week_bucket, deriv
 from lark_to_notes.tasks.models import TaskRecord, TaskStatus
 from lark_to_notes.tasks.registry import (
     add_evidence,
+    apply_task_override,
     get_task,
     get_task_by_fingerprint,
     list_evidence,
@@ -348,6 +350,42 @@ def test_update_task_status_invalid_raises(conn: sqlite3.Connection) -> None:
         update_task_status(conn, task_id, "invalid_status")
 
 
+def test_apply_task_override_updates_fields_and_manual_state(conn: sqlite3.Connection) -> None:
+    task_id, _ = _make_task(conn)
+
+    changed = apply_task_override(
+        conn,
+        task_id,
+        action="wrong_class",
+        artifact_path="raw/review/feedback.yaml",
+        task_class="follow_up",
+        promotion_rec="daily_only",
+        comment="This is a follow-up, not a direct task.",
+    )
+
+    task = get_task(conn, task_id)
+    assert changed is True
+    assert task is not None
+    assert task.task_class == "follow_up"
+    assert task.promotion_rec == "daily_only"
+    assert task.manual_override_state is not None
+    override_state = json.loads(task.manual_override_state)
+    assert override_state["action"] == "wrong_class"
+    assert override_state["artifact_path"] == "raw/review/feedback.yaml"
+
+
+def test_apply_task_override_missing_merge_target_raises(conn: sqlite3.Connection) -> None:
+    task_id, _ = _make_task(conn)
+
+    with pytest.raises(LookupError, match="merge_into_task_id"):
+        apply_task_override(
+            conn,
+            task_id,
+            action="merge",
+            merge_into_task_id="missing-task-id",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Registry: add_evidence / list_evidence
 # ---------------------------------------------------------------------------
@@ -409,12 +447,22 @@ def test_upsert_replay_returns_same_task_id(conn: sqlite3.Connection) -> None:
     """Re-processing the same (fingerprint) never creates a second task."""
     fp = derive_fingerprint("Please send the report", "dm-bob:s1", "2026-04-14 10:00")
     id1, c1 = upsert_task(
-        conn, fingerprint=fp, title="Send report", task_class="task",
-        confidence_band="high", reason_code="en_please_verb", promotion_rec="current_tasks",
+        conn,
+        fingerprint=fp,
+        title="Send report",
+        task_class="task",
+        confidence_band="high",
+        reason_code="en_please_verb",
+        promotion_rec="current_tasks",
     )
     id2, c2 = upsert_task(
-        conn, fingerprint=fp, title="Send report", task_class="task",
-        confidence_band="high", reason_code="en_please_verb", promotion_rec="current_tasks",
+        conn,
+        fingerprint=fp,
+        title="Send report",
+        task_class="task",
+        confidence_band="high",
+        reason_code="en_please_verb",
+        promotion_rec="current_tasks",
     )
     assert id1 == id2
     assert c1 is True

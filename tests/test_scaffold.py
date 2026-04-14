@@ -16,6 +16,7 @@ import lark_to_notes.render
 import lark_to_notes.runtime
 import lark_to_notes.storage
 import lark_to_notes.tasks
+import lark_to_notes.testing
 
 
 def test_version_is_set() -> None:
@@ -33,6 +34,7 @@ def test_all_subpackages_importable() -> None:
         lark_to_notes.runtime,
         lark_to_notes.storage,
         lark_to_notes.tasks,
+        lark_to_notes.testing,
     ]
     assert all(p is not None for p in packages)
 
