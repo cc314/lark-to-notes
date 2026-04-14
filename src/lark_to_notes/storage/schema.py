@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -88,9 +88,58 @@ CREATE INDEX IF NOT EXISTS idx_intake_runs_source_id
     ON intake_runs (source_id);
 """
 
+# ---------------------------------------------------------------------------
+# Version 3 — task registry, lifecycle, and evidence tables
+# ---------------------------------------------------------------------------
+
+_V3_DDL = """
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id         TEXT PRIMARY KEY,
+    fingerprint     TEXT NOT NULL UNIQUE,
+    title           TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'open'
+                        CHECK(status IN (
+                            'open', 'needs_review', 'snoozed', 'dismissed',
+                            'completed', 'merged', 'superseded'
+                        )),
+    task_class      TEXT NOT NULL,
+    confidence_band TEXT NOT NULL,
+    summary         TEXT NOT NULL DEFAULT '',
+    reason_code     TEXT NOT NULL DEFAULT '',
+    promotion_rec   TEXT NOT NULL DEFAULT 'review',
+    assignee_refs   TEXT NOT NULL DEFAULT '[]',
+    due_at          TEXT,
+    manual_override_state TEXT,
+    created_from_raw_record_id TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    last_updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_fingerprint
+    ON tasks (fingerprint);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_status
+    ON tasks (status);
+
+CREATE TABLE IF NOT EXISTS task_evidence (
+    evidence_id      TEXT PRIMARY KEY,
+    task_id          TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    raw_record_id    TEXT,
+    source_item_id   TEXT NOT NULL DEFAULT '',
+    excerpt          TEXT NOT NULL DEFAULT '',
+    confidence_delta REAL NOT NULL DEFAULT 0.0,
+    evidence_role    TEXT NOT NULL DEFAULT 'primary',
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_evidence_task_id
+    ON task_evidence (task_id);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
+    3: _V3_DDL,
 }
 
 
