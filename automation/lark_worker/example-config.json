@@ -1,0 +1,48 @@
+{
+  "vault_root": "../..",
+  "state_db": "~/.local/share/notes-lark-worker/state.db",
+  "raw_dir": "raw/lark-worker",
+  "current_tasks_note": "area/current tasks/index.md",
+  "poll_interval_seconds": 300,
+  "poll_lookback_days": 2,
+  "history_lookback_days": 30,
+  "self_sender_names": [
+    "Chen Chao"
+  ],
+  "self_sender_ids": [],
+  "bot_event_types": [
+    "im.message.receive_v1"
+  ],
+  "task_keywords": [
+    "please",
+    "can you",
+    "check",
+    "need",
+    "follow up",
+    "发我",
+    "帮",
+    "麻烦",
+    "请",
+    "有吗",
+    "看看",
+    "空的时候",
+    "?",
+    "？"
+  ],
+  "user_sources": [
+    {
+      "source_id": "dm-example",
+      "source_type": "dm_user",
+      "lark_id": "ou_xxx",
+      "name": "Example DM",
+      "enabled": false
+    },
+    {
+      "source_id": "chat-example",
+      "source_type": "chat",
+      "lark_id": "oc_xxx",
+      "name": "Example Group",
+      "enabled": false
+    }
+  ]
+}
