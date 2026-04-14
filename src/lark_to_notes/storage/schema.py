@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -136,10 +136,52 @@ CREATE INDEX IF NOT EXISTS idx_task_evidence_task_id
     ON task_evidence (task_id);
 """
 
+# ---------------------------------------------------------------------------
+# Version 4 — runtime operations: run tracking and dead-letter quarantine
+# ---------------------------------------------------------------------------
+
+_V4_DDL = """
+CREATE TABLE IF NOT EXISTS runtime_runs (
+    run_id           TEXT PRIMARY KEY,
+    command          TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'running'
+                         CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
+    started_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    finished_at      TEXT,
+    items_processed  INTEGER NOT NULL DEFAULT 0,
+    items_failed     INTEGER NOT NULL DEFAULT 0,
+    error            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_runs_status
+    ON runtime_runs (status);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_runs_started_at
+    ON runtime_runs (started_at);
+
+CREATE TABLE IF NOT EXISTS dead_letters (
+    dl_id            TEXT PRIMARY KEY,
+    source_id        TEXT NOT NULL,
+    raw_message_id   TEXT,
+    attempt_count    INTEGER NOT NULL DEFAULT 0,
+    first_failed_at  TEXT NOT NULL,
+    last_failed_at   TEXT NOT NULL,
+    last_error       TEXT NOT NULL,
+    quarantined_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dead_letters_source_id
+    ON dead_letters (source_id);
+
+CREATE INDEX IF NOT EXISTS idx_dead_letters_quarantined_at
+    ON dead_letters (quarantined_at);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
     3: _V3_DDL,
+    4: _V4_DDL,
 }
 
 

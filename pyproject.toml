@@ -60,6 +60,9 @@ ignore = [
 "src/lark_to_notes/intake/replay.py" = ["TCH003"]
 "src/lark_to_notes/render/models.py" = ["TCH003"]
 "src/lark_to_notes/render/writer.py" = ["TCH003"]
+"src/lark_to_notes/runtime/lock.py" = ["TCH003"]
+"src/lark_to_notes/runtime/reconcile.py" = ["TCH003"]
+"src/lark_to_notes/runtime/registry.py" = ["TCH003"]
 
 [tool.mypy]
 python_version = "3.12"
