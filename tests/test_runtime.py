@@ -70,8 +70,8 @@ def conn() -> Generator[sqlite3.Connection, None, None]:
 
 
 class TestSchemaV5:
-    def test_schema_version_is_5(self) -> None:
-        assert SCHEMA_VERSION == 5
+    def test_schema_version_is_6(self) -> None:
+        assert SCHEMA_VERSION == 6
 
     def test_runtime_runs_table_exists(self, conn) -> None:  # type: ignore[no-untyped-def]
         row = conn.execute(

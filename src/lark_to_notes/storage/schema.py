@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -204,12 +204,49 @@ CREATE INDEX IF NOT EXISTS idx_feedback_events_created_at
     ON feedback_events (created_at);
 """
 
+# ---------------------------------------------------------------------------
+# Version 6 — LLM budget tracking and content-result cache
+# ---------------------------------------------------------------------------
+
+_V6_DDL = """
+CREATE TABLE IF NOT EXISTS llm_usage_records (
+    call_id           TEXT PRIMARY KEY,
+    provider          TEXT NOT NULL DEFAULT '',
+    model             TEXT NOT NULL DEFAULT '',
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    duration_ms       INTEGER NOT NULL DEFAULT 0,
+    cached            INTEGER NOT NULL DEFAULT 0,
+    fallback          INTEGER NOT NULL DEFAULT 0,
+    fallback_reason   TEXT NOT NULL DEFAULT 'not_applicable',
+    run_id            TEXT NOT NULL DEFAULT '',
+    source_id         TEXT NOT NULL DEFAULT '',
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_usage_run_id
+    ON llm_usage_records (run_id);
+
+CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at
+    ON llm_usage_records (created_at);
+
+CREATE TABLE IF NOT EXISTS content_cache (
+    cache_key   TEXT PRIMARY KEY,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    expires_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_cache_expires_at
+    ON content_cache (expires_at);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
     3: _V3_DDL,
     4: _V4_DDL,
     5: _V5_DDL,
+    6: _V6_DDL,
 }
 
 
