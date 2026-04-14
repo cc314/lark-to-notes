@@ -134,3 +134,454 @@ def test_feedback_import_json_applies_artifact(
     assert updated_task is not None
     assert updated_task.task_class == "task"
     assert updated_task.promotion_rec == "current_tasks"
+
+
+# ---------------------------------------------------------------------------
+# sources validate
+# ---------------------------------------------------------------------------
+
+
+def test_sources_validate_ok_source(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    source = WatchedSource(
+        source_id=make_source_id(SourceType.DM, "ou_val1"),
+        source_type=SourceType.DM,
+        external_id="ou_val1",
+        name="Valid DM",
+    )
+    upsert_watched_source(conn, source)
+
+    exit_code = run(["sources", "validate", "--db", str(db_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["overall"] == "ok"
+    assert payload["count"] == 1
+    assert payload["sources"][0]["status"] == "ok"
+    assert payload["sources"][0]["issues"] == []
+
+
+def test_sources_validate_reports_error_for_empty_external_id(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    # Insert a source with an empty external_id directly via SQL to bypass Python validation.
+    conn.execute(
+        "INSERT INTO watched_sources (source_id, source_type, external_id, name, enabled, config_json)"
+        " VALUES (?, ?, ?, ?, 1, '{}')",
+        ("dm:bad", "dm", "", "Bad DM"),
+    )
+    conn.commit()
+
+    exit_code = run(["sources", "validate", "--db", str(db_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["overall"] == "error"
+    src = next(s for s in payload["sources"] if s["source_id"] == "dm:bad")
+    assert src["status"] == "error"
+    assert any("external_id" in issue for issue in src["issues"])
+
+
+def test_sources_validate_human_readable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    source = WatchedSource(
+        source_id=make_source_id(SourceType.DM, "ou_hr"),
+        source_type=SourceType.DM,
+        external_id="ou_hr",
+        name="HR Source",
+    )
+    upsert_watched_source(conn, source)
+
+    exit_code = run(["sources", "validate", "--db", str(db_path)])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "overall: ok" in out
+
+
+# ---------------------------------------------------------------------------
+# reclassify
+# ---------------------------------------------------------------------------
+
+
+def _insert_test_message(conn: object, message_id: str, content: str) -> None:
+    from lark_to_notes.intake.ledger import insert_raw_message
+    from lark_to_notes.intake.models import RawMessage
+
+    msg = RawMessage(
+        message_id=message_id,
+        source_id="dm:ou_reclassify",
+        source_type="dm_user",
+        chat_id="ou_chat",
+        chat_type="p2p",
+        sender_id="ou_sender",
+        sender_name="Alice",
+        direction="incoming",
+        created_at="2026-05-01T10:00:00Z",
+        content=content,
+        payload={},
+        ingested_at="2026-05-01T10:00:00Z",
+    )
+    insert_raw_message(conn, msg)  # type: ignore[arg-type]
+
+
+def test_reclassify_inserts_tasks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _insert_test_message(conn, "om_rcl_1", "Please review this document by Friday")
+    conn.commit()
+
+    exit_code = run(["reclassify", "--db", str(db_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["messages_processed"] == 1
+    assert payload["tasks_inserted"] == 1
+    assert payload["tasks_skipped"] == 0
+    assert payload["dry_run"] is False
+
+
+def test_reclassify_dry_run_does_not_write(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _insert_test_message(conn, "om_rcl_dr1", "Todo: write unit tests")
+    conn.commit()
+
+    exit_code = run(["reclassify", "--db", str(db_path), "--dry-run", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["dry_run"] is True
+    assert payload["messages_processed"] == 1
+    # A new fingerprint → would insert 1 task.
+    assert payload["tasks_inserted"] == 1
+    assert payload["tasks_skipped"] == 0
+    # No tasks written — DB still empty.
+    rows = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()
+    assert rows[0] == 0
+
+
+def test_reclassify_dry_run_skips_existing_fingerprint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _insert_test_message(conn, "om_rcl_dr2", "Todo: write docs")
+    conn.commit()
+
+    # Real run first to insert the task.
+    run(["reclassify", "--db", str(db_path)])
+    capsys.readouterr()
+
+    # Dry-run should see the existing fingerprint and count it as skipped.
+    exit_code = run(["reclassify", "--db", str(db_path), "--dry-run", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["tasks_inserted"] == 0
+    assert payload["tasks_skipped"] == 1
+
+
+def test_reclassify_skips_existing_tasks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _insert_test_message(conn, "om_rcl_2", "Please review this document")
+    conn.commit()
+
+    run(["reclassify", "--db", str(db_path)])
+    capsys.readouterr()
+
+    exit_code = run(["reclassify", "--db", str(db_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["tasks_skipped"] == 1
+    assert payload["tasks_inserted"] == 0
+
+
+def test_reclassify_source_filter(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _insert_test_message(conn, "om_rcl_3", "Ping me when done")
+    conn.commit()
+
+    exit_code = run(
+        ["reclassify", "--db", str(db_path), "--source-id", "dm:other", "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["messages_processed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# render
+# ---------------------------------------------------------------------------
+
+
+def test_render_renders_open_tasks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    conn = connect(db_path)
+    init_db(conn)
+    upsert_task(
+        conn,
+        fingerprint="renderfp0001",
+        title="Write quarterly report",
+        task_class="task",
+        confidence_band="high",
+        reason_code="explicit_task_keyword",
+        promotion_rec="current_tasks",
+    )
+    conn.commit()
+
+    exit_code = run(
+        ["render", "--db", str(db_path), "--vault-root", str(vault_root), "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["tasks_found"] == 1
+    assert payload["rendered"] == 1
+    assert payload["errors"] == []
+
+
+def test_render_no_tasks_exits_zero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    conn = connect(db_path)
+    init_db(conn)
+
+    exit_code = run(
+        ["render", "--db", str(db_path), "--vault-root", str(vault_root), "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["tasks_found"] == 0
+    assert payload["rendered"] == 0
+
+
+# ---------------------------------------------------------------------------
+# reconcile
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_no_sources_exits_zero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+
+    exit_code = run(["reconcile", "--db", str(db_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["sources_checked"] == 0
+    assert payload["gaps_found"] == 0
+
+
+def test_reconcile_with_checkpoint_reports_no_gap(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    # Insert a watched source and a checkpoint.
+    source = WatchedSource(
+        source_id=make_source_id(SourceType.DM, "ou_recon"),
+        source_type=SourceType.DM,
+        external_id="ou_recon",
+        name="Recon Source",
+    )
+    upsert_watched_source(conn, source)
+    conn.execute(
+        "INSERT INTO checkpoints (source_id, last_message_id, last_message_timestamp)"
+        " VALUES (?, ?, ?)",
+        (source.source_id, "om_last_123", "2026-05-01T10:00:00Z"),
+    )
+    conn.commit()
+
+    exit_code = run(["reconcile", "--db", str(db_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    # When source_state == checkpoint cursor, no gap.
+    assert exit_code == 0
+    assert payload["sources_checked"] >= 1
+
+
+def test_reconcile_human_readable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+
+    exit_code = run(["reconcile", "--db", str(db_path)])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "checked" in out
+
+
+# ---------------------------------------------------------------------------
+# budget status
+# ---------------------------------------------------------------------------
+
+
+def test_budget_status_no_records(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+
+    exit_code = run(["budget", "status", "--db", str(db_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "no_records"
+
+
+def test_budget_status_with_records(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import datetime
+
+    from lark_to_notes.budget.store import record_usage
+
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    today = datetime.date.today().isoformat()
+    record_usage(
+        conn,
+        {
+            "call_id": "cli-budget-test-1",
+            "provider": "copilot",
+            "model": "gpt-4o",
+            "run_id": "run-budget-cli-1",
+            "source_id": "dm:test",
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "duration_ms": 200,
+            "cached": False,
+            "fallback": False,
+            "fallback_reason": "not_applicable",
+            "created_at": f"{today}T09:00:00Z",
+        },
+    )
+    conn.commit()
+
+    exit_code = run(["budget", "status", "--db", str(db_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert payload["call_count"] == 1
+    assert payload["prompt_tokens"] == 100
+    assert payload["completion_tokens"] == 50
+
+
+def test_budget_status_run_scope(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import datetime
+
+    from lark_to_notes.budget.store import record_usage
+
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    today = datetime.date.today().isoformat()
+    record_usage(
+        conn,
+        {
+            "call_id": "cli-scope-test-1",
+            "provider": "copilot",
+            "model": "gpt-4o",
+            "run_id": "run-scope-test",
+            "source_id": "dm:test",
+            "prompt_tokens": 20,
+            "completion_tokens": 10,
+            "duration_ms": 100,
+            "cached": False,
+            "fallback": False,
+            "fallback_reason": "not_applicable",
+            "created_at": f"{today}T09:00:00Z",
+        },
+    )
+    conn.commit()
+
+    exit_code = run(
+        ["budget", "status", "--db", str(db_path), "--run-id", "run-scope-test", "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert payload["call_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Lark connectivity stubs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cmd", ["sync-once", "sync-daemon", "backfill"])
+def test_lark_stubs_exit_nonzero(
+    cmd: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = run([cmd])
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "lark_worker" in out or "automation" in out
