@@ -58,6 +58,8 @@ ignore = [
 "src/lark_to_notes/storage/db.py" = ["TCH003"]
 "src/lark_to_notes/intake/ledger.py" = ["TCH003"]
 "src/lark_to_notes/intake/replay.py" = ["TCH003"]
+"src/lark_to_notes/render/models.py" = ["TCH003"]
+"src/lark_to_notes/render/writer.py" = ["TCH003"]
 
 [tool.mypy]
 python_version = "3.12"
