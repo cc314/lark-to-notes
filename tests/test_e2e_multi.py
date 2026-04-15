@@ -358,7 +358,7 @@ def test_multi_source_health_aggregates(
         ],
     )
     assert exit_code == 0
-    runtime = doctor_payload["runtime"]
+    runtime: dict[str, object] = doctor_payload["runtime"]  # type: ignore[assignment]
     assert runtime["dead_letter_count"] == 0, (
         f"unexpected dead letters: {runtime['dead_letter_count']}"
     )
