@@ -71,6 +71,10 @@ strict = true
 files = ["src", "tests"]
 exclude = ["automation/"]
 
+[[tool.mypy.overrides]]
+module = "automation.*"
+ignore_errors = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"

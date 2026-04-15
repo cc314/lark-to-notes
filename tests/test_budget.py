@@ -165,15 +165,15 @@ def test_usage_record_fields() -> None:
 
 
 def test_provider_route_enum_values() -> None:
-    assert ProviderRoute.HEURISTICS_ONLY == "heuristics_only"
-    assert ProviderRoute.LLM_ESCALATE == "llm_escalate"
-    assert ProviderRoute.CACHE_HIT == "cache_hit"
+    assert ProviderRoute.HEURISTICS_ONLY.value == "heuristics_only"
+    assert ProviderRoute.LLM_ESCALATE.value == "llm_escalate"
+    assert ProviderRoute.CACHE_HIT.value == "cache_hit"
 
 
 def test_fallback_reason_enum_values() -> None:
-    assert FallbackReason.BUDGET_EXHAUSTED == "budget_exhausted"
-    assert FallbackReason.CONTENT_CACHED == "content_cached"
-    assert FallbackReason.NOT_APPLICABLE == "not_applicable"
+    assert FallbackReason.BUDGET_EXHAUSTED.value == "budget_exhausted"
+    assert FallbackReason.CONTENT_CACHED.value == "content_cached"
+    assert FallbackReason.NOT_APPLICABLE.value == "not_applicable"
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +518,7 @@ def test_coalesce_batch_basic() -> None:
 
 
 def test_coalesce_batch_empty() -> None:
-    batches = coalesce_batch([], batch_size=5)
+    batches: list[list[int]] = coalesce_batch([], batch_size=5)
     assert batches == [[]]
 
 

@@ -127,7 +127,9 @@ class TestRawNoteGolden:
 
         # Simulate user adding prose before and after the block
         original = note_path.read_text(encoding="utf-8")
-        user_note = "User prose above the block.\n\n" + original + "\n\nUser prose below the block.\n"
+        user_note = (
+            "User prose above the block.\n\n" + original + "\n\nUser prose below the block.\n"
+        )
         note_path.write_text(user_note, encoding="utf-8")
 
         # Re-render with updated summary
@@ -255,9 +257,7 @@ class TestCurrentTasksGolden:
         content = ct_path.read_text(encoding="utf-8")
         # CT block ID is ltn-ct-{fingerprint}
         block_id = f"ltn-ct-{item.fingerprint}"
-        assert content.count(make_begin_marker(block_id)) == 1, (
-            "block was duplicated by re-render"
-        )
+        assert content.count(make_begin_marker(block_id)) == 1, "block was duplicated by re-render"
 
     def test_block_ids_properly_listed(self, tmp_path: Path) -> None:
         current_tasks_dir = tmp_path / "area" / "current tasks"
@@ -308,12 +308,9 @@ class TestNoteWriterPipelineGolden:
         results2 = writer.render_pipeline(item)
 
         for r in results2:
-            if r.outcome != RenderOutcome.SKIPPED:
-                # Allow UPDATED outcome for surfaces where some field actually changed
-                # (should not happen when item is identical)
-                assert r.outcome == RenderOutcome.SKIPPED, (
-                    f"surface {r.surface} was re-rendered but should be SKIPPED: {r}"
-                )
+            assert r.outcome == RenderOutcome.SKIPPED, (
+                f"surface {r.surface} was re-rendered but should be SKIPPED: {r}"
+            )
 
     def test_pipeline_skips_current_tasks_for_daily_only(self, tmp_path: Path) -> None:
         vault = tmp_path / "vault"
@@ -345,7 +342,9 @@ class TestBlockSafety:
         note_path.write_text(initial_note, encoding="utf-8")
 
         for i in range(5):
-            updated = replace_block(note_path.read_text(encoding="utf-8"), block_id, f"Content v{i}.")
+            updated = replace_block(
+                note_path.read_text(encoding="utf-8"), block_id, f"Content v{i}."
+            )
             note_path.write_text(updated, encoding="utf-8")
 
         final = note_path.read_text(encoding="utf-8")
@@ -354,9 +353,7 @@ class TestBlockSafety:
         assert "Content v4." in final
         assert final.count(make_begin_marker(block_id)) == 1
 
-    def test_new_block_appended_without_destroying_existing_content(
-        self, tmp_path: Path
-    ) -> None:
+    def test_new_block_appended_without_destroying_existing_content(self, tmp_path: Path) -> None:
         """Adding a second block leaves the first block and user content intact."""
         note_path = tmp_path / "note.md"
         note_path.write_text(
@@ -368,6 +365,7 @@ class TestBlockSafety:
 
         # Append block B
         from lark_to_notes.render.blocks import replace_block
+
         existing = note_path.read_text(encoding="utf-8")
         # Block B doesn't exist yet, so replace_block with append behaviour appends it
         updated = replace_block(existing, "ltn-block-b", "Block B content.")
@@ -381,15 +379,14 @@ class TestBlockSafety:
         assert final.count(make_begin_marker("ltn-block-a")) == 1
         assert final.count(make_begin_marker("ltn-block-b")) == 1
 
-    def test_malformed_block_does_not_corrupt_surrounding_text(
-        self, tmp_path: Path
-    ) -> None:
+    def test_malformed_block_does_not_corrupt_surrounding_text(self, tmp_path: Path) -> None:
         """A malformed (unclosed) block causes FAILED outcome, not file corruption."""
         # Build a raw note file with a manually malformed block (begin without end)
         block_id = "ltn-raw-abc123"
         malformed = (
             "---\ntype: raw\n---\n\n"
-            + make_begin_marker(block_id) + "\n"
+            + make_begin_marker(block_id)
+            + "\n"
             + "Dangling content without end marker.\n"
         )
         note_path = tmp_path / "raw" / "2026-05-01-broken.md"

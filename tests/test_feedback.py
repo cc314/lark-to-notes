@@ -11,6 +11,7 @@ from lark_to_notes.feedback import (
     FeedbackAction,
     FeedbackArtifact,
     FeedbackDirective,
+    FeedbackEntry,
     apply_feedback_artifact,
     list_feedback_events,
     parse_feedback_artifact,
@@ -287,11 +288,8 @@ def _make_entry(
     action: str = "confirm",
     target_type: str = "task",
     comment: str = "",
-) -> object:
-    from lark_to_notes.feedback.models import (
-        FeedbackEntry,
-        FeedbackTargetType,
-    )
+) -> FeedbackEntry:
+    from lark_to_notes.feedback.models import FeedbackTargetType
 
     return FeedbackEntry(
         target_type=FeedbackTargetType(target_type),
@@ -407,9 +405,7 @@ class TestFeedbackStoreGaps:
 class TestFeedbackServiceGaps:
     """Tests for list_feedback_events delegation and _derive_task_override branches."""
 
-    def test_list_feedback_events_target_type_filter(
-        self, conn: sqlite3.Connection
-    ) -> None:
+    def test_list_feedback_events_target_type_filter(self, conn: sqlite3.Connection) -> None:
         from lark_to_notes.feedback.store import insert_event
 
         insert_event(conn, _make_entry(target_id="task-y", target_type="task"))
@@ -423,9 +419,7 @@ class TestFeedbackServiceGaps:
         assert all(r.target_id == "task-y" for r in results)
         assert len(results) == 1
 
-    def test_list_feedback_events_target_id_filter(
-        self, conn: sqlite3.Connection
-    ) -> None:
+    def test_list_feedback_events_target_id_filter(self, conn: sqlite3.Connection) -> None:
         from lark_to_notes.feedback.store import insert_event
 
         insert_event(conn, _make_entry(target_id="task-a1"), artifact_path="path-a1")
@@ -464,9 +458,7 @@ class TestFeedbackServiceGaps:
         with pytest.raises(ValueError, match="task_class"):
             apply_feedback_artifact(conn, artifact)
 
-    def test_derive_task_override_context_defaults(
-        self, conn: sqlite3.Connection
-    ) -> None:
+    def test_derive_task_override_context_defaults(self, conn: sqlite3.Connection) -> None:
         """WRONG_CLASS with task_class='context' -> status dismissed, promotion daily_only."""
         from lark_to_notes.tasks.registry import get_task
 
@@ -486,9 +478,7 @@ class TestFeedbackServiceGaps:
         assert task.status == "dismissed"
         assert task.promotion_rec == "daily_only"
 
-    def test_derive_task_override_needs_review_defaults(
-        self, conn: sqlite3.Connection
-    ) -> None:
+    def test_derive_task_override_needs_review_defaults(self, conn: sqlite3.Connection) -> None:
         """WRONG_CLASS with task_class='needs_review' -> status needs_review, promotion review."""
         from lark_to_notes.tasks.registry import get_task
 
@@ -508,9 +498,7 @@ class TestFeedbackServiceGaps:
         assert task.status == "needs_review"
         assert task.promotion_rec == "review"
 
-    def test_derive_task_override_follow_up_defaults(
-        self, conn: sqlite3.Connection
-    ) -> None:
+    def test_derive_task_override_follow_up_defaults(self, conn: sqlite3.Connection) -> None:
         """WRONG_CLASS with task_class='follow_up' -> status open, promotion daily_only."""
         from lark_to_notes.tasks.registry import get_task
 

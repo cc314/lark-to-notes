@@ -54,7 +54,7 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
-def coalesce_batch(items: list[object], batch_size: int) -> list[list[object]]:
+def coalesce_batch[T](items: list[T], batch_size: int) -> list[list[T]]:
     """Partition *items* into sub-lists of at most *batch_size* elements.
 
     Args:
