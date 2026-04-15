@@ -11,46 +11,27 @@ Agents must protect both the **vault's existing human-authored knowledge** and t
 
 ---
 
-## RULE 0 — THE OVERRIDE PREROGATIVE
+## RULE 0 - THE FUNDAMENTAL OVERRIDE PREROGATIVE
 
-**The human's instructions override everything in this file.**
-
-If the user explicitly tells you to do something, that instruction takes precedence over the defaults, workflows, and preferences below.
+If I tell you to do something, even if it goes against what follows below, YOU MUST LISTEN TO ME. I AM IN CHARGE, NOT YOU.
 
 ---
 
-## RULE 1 — NO FILE DELETION
+## RULE NUMBER 1: NO FILE DELETION
 
-**Never delete a file or folder without explicit user permission.**
+**YOU ARE NEVER ALLOWED TO DELETE A FILE WITHOUT EXPRESS PERMISSION.** Even a new file that you yourself created, such as a test code file. You have a horrible track record of deleting critically important files or otherwise throwing away tons of expensive work. As a result, you have permanently lost any and all rights to determine that a file or folder should be deleted.
 
-This includes:
-
-- files you created yourself
-- temporary-looking files inside the repo
-- renames or moves that would effectively delete the original path
-- cleanup of generated artifacts
-
-If deletion seems useful, ask first.
+**YOU MUST ALWAYS ASK AND RECEIVE CLEAR, WRITTEN PERMISSION BEFORE EVER DELETING A FILE OR FOLDER OF ANY KIND.**
 
 ---
 
-## Irreversible Git & Filesystem Actions — Never Break Glass
+## Irreversible Git & Filesystem Actions — DO NOT EVER BREAK GLASS
 
-The following are **absolutely forbidden** unless the user explicitly asks for the exact command and clearly accepts the irreversible consequences:
-
-- `git reset --hard`
-- `git clean -fd`
-- `rm -rf`
-- `git checkout -- <path>`
-- `git restore --source ...`
-- any equivalent destructive overwrite or delete command
-
-Rules:
-
-1. Never guess that a destructive command is safe.
-2. Never use stash/revert/restore to "clean things up" around other agents' work.
-3. Prefer inspection commands first: `git status`, `git diff`, `git log`, `git show`.
-4. If destructive cleanup is ever requested, restate the exact impact before running it.
+1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences.
+2. **No guessing:** If there is any uncertainty about what a command might delete or overwrite, stop immediately and ask the user for specific approval. "I think it's safe" is never acceptable.
+3. **Safer alternatives first:** When cleanup or rollbacks are needed, request permission to use non-destructive options (`git status`, `git diff`, `git stash`, copying to backups) before ever considering a destructive command.
+4. **Mandatory explicit plan:** Even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
+5. **Document the confirmation:** When running any approved destructive command, record (in the session notes / final response) the exact user text that authorized it, the command actually run, and the execution time. If that record is absent, the operation did not happen.
 
 ---
 
@@ -154,6 +135,8 @@ Additional rules:
 - Do not invent a parallel toolchain if the repo already defines one.
 
 ---
+## CODE REVIEW
+After completing each bead, do a "fresh eye" self-review before moving to the next one.
 
 ## Testing Practice
 
@@ -434,69 +417,163 @@ cd ~/mcp_agent_mail && uv run python -m mcp_agent_mail.cli doctor check --verbos
 
 **Implication:** Agent Mail is available for coordination here, but use the modern endpoints and remember that `am` is the server-launch wrapper while the full admin CLI lives in `~/mcp_agent_mail`.
 
-### Beads (`br`) — Dependency-Aware Backlog Management
 
-**Purpose:** track work as a dependency graph in `.beads/`, including priorities, status, and explicit blockers.
+<!-- br-agent-instructions-v1 -->
 
-**Use it for:**
+---
 
-- creating or updating issues
-- dependency management
-- closing merged or completed work
-- syncing durable issue state to `.beads/issues.jsonl`
+## Beads Workflow Integration
 
-**Core rules:**
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`/`bd`) for issue tracking. Issues are stored in `.beads/` and tracked in git.
 
-- always prefer `--json` for agent use
-- always run `br sync --flush-only` after meaningful changes
-- never assume `br` performs git actions
-
-**Health check:**
+### Essential Commands
 
 ```bash
-br --version
-br doctor
-br dep cycles
+# View ready issues (open, unblocked, not deferred)
+br ready              # or: bd ready
+
+# List and search
+br list --status=open # All open issues
+br show <id>          # Full issue details with dependencies
+br search "keyword"   # Full-text search
+
+# Create and update
+br create --title="..." --description="..." --type=task --priority=2
+br update <id> --status=in_progress
+br close <id> --reason="Completed"
+br close <id1> <id2>  # Close multiple issues at once
+
+# Sync with git
+br sync --flush-only  # Export DB to JSONL
+br sync --status      # Check sync status
 ```
 
-**Current local status:** usable but degraded.
+### Workflow Pattern
 
-- `br` is installed (`0.1.38`)
-- issue data is readable and writable
-- `br ready --json` and `br dep cycles` both work on this repo
-- `br doctor` currently reports a stale `blocked_issues_cache` anomaly
-- SQLite integrity warnings are also present
+1. **Start**: Run `br ready` to find actionable work
+2. **Claim**: Use `br update <id> --status=in_progress`
+3. **Work**: Implement the task
+4. **Complete**: Use `br close <id>`
+5. **Sync**: Always run `br sync --flush-only` at session end
 
-**Implication:** use `br`, but validate graph reasoning with `bv` when in doubt.
+### Key Concepts
 
-### `bv` — Graph-Aware Triage and Priority Analysis
+- **Dependencies**: Issues can block other issues. `br ready` shows only open, unblocked work.
+- **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers 0-4, not words)
+- **Types**: task, bug, feature, epic, chore, docs, question
+- **Blocking**: `br dep add <issue> <depends-on>` to add dependencies
 
-**Purpose:** analyze the Beads graph for critical path, bottlenecks, priority alignment, and execution order.
+### Session Protocol
 
-**Use it for:**
-
-- triage
-- topological execution planning
-- bottleneck detection
-- graph-health inspection
-
-**Core rule:** **never run bare `bv`**. Use only `--robot-*` modes.
-
-**Health check:**
+**Before ending any session, run this checklist:**
 
 ```bash
-bv --version
-bv --robot-triage
-bv --robot-insights
+git status              # Check what changed
+git add <files>         # Stage code changes
+br sync --flush-only    # Export beads changes to JSONL
+git commit -m "..."     # Commit everything
+git push                # Push to remote
 ```
 
-**Current local status:** healthy in robot mode on this machine.
+### Best Practices
 
-- `bv` is installed (`v0.15.2`)
-- `bv --robot-triage` returns current planning output for this repo
-- `bv --robot-insights` runs successfully
+- Check `br ready` at session start to find available work
+- Update status as you work (in_progress → closed)
+- Create new issues with `br create` when you discover tasks
+- Use descriptive titles and set appropriate priority/type
+- Always sync before ending session
 
-**Implication:** safe to use for graph triage and backlog analysis as long as you stay in `--robot-*` mode.
+<!-- end-br-agent-instructions -->
+
+<!-- bv-agent-instructions-v2 -->
+
+### Using bv as an AI sidecar
+
+bv is a graph-aware triage engine for Beads projects (.beads/beads.jsonl). Instead of parsing JSONL or hallucinating graph traversal, use robot flags for deterministic, dependency-aware outputs with precomputed metrics (PageRank, betweenness, critical path, cycles, HITS, eigenvector, k-core).
+
+**Scope boundary:** bv handles *what to work on* (triage, priority, planning). `br` handles creating, modifying, and closing beads.
+
+**CRITICAL: Use ONLY --robot-* flags. Bare bv launches an interactive TUI that blocks your session.**
+
+#### The Workflow: Start With Triage
+
+**`bv --robot-triage` is your single entry point.** It returns everything you need in one call:
+- `quick_ref`: at-a-glance counts + top 3 picks
+- `recommendations`: ranked actionable items with scores, reasons, unblock info
+- `quick_wins`: low-effort high-impact items
+- `blockers_to_clear`: items that unblock the most downstream work
+- `project_health`: status/type/priority distributions, graph metrics
+- `commands`: copy-paste shell commands for next steps
+
+```bash
+bv --robot-triage        # THE MEGA-COMMAND: start here
+bv --robot-next          # Minimal: just the single top pick + claim command
+
+# Token-optimized output (TOON) for lower LLM context usage:
+bv --robot-triage --format toon
+```
+
+#### Other bv Commands
+
+| Command | Returns |
+|---------|---------|
+| `--robot-plan` | Parallel execution tracks with unblocks lists |
+| `--robot-priority` | Priority misalignment detection with confidence |
+| `--robot-insights` | Full metrics: PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core |
+| `--robot-alerts` | Stale issues, blocking cascades, priority mismatches |
+| `--robot-suggest` | Hygiene: duplicates, missing deps, label suggestions, cycle breaks |
+| `--robot-diff --diff-since <ref>` | Changes since ref: new/closed/modified issues |
+| `--robot-graph [--graph-format=json\|dot\|mermaid]` | Dependency graph export |
+
+#### Scoping & Filtering
+
+```bash
+bv --robot-plan --label backend              # Scope to label's subgraph
+bv --robot-insights --as-of HEAD~30          # Historical point-in-time
+bv --recipe actionable --robot-plan          # Pre-filter: ready to work (no blockers)
+bv --recipe high-impact --robot-triage       # Pre-filter: top PageRank scores
+```
+
+### br Commands for Issue Management
+
+```bash
+br ready              # Show issues ready to work (no blockers)
+br list --status=open # All open issues
+br show <id>          # Full issue details with dependencies
+br create --title="..." --type=task --priority=2
+br update <id> --status=in_progress
+br close <id> --reason="Completed"
+br close <id1> <id2>  # Close multiple issues at once
+br sync --flush-only  # Export DB to JSONL
+```
+
+### Workflow Pattern
+
+1. **Triage**: Run `bv --robot-triage` to find the highest-impact actionable work
+2. **Claim**: Use `br update <id> --status=in_progress`
+3. **Work**: Implement the task
+4. **Complete**: Use `br close <id>`
+5. **Sync**: Always run `br sync --flush-only` at session end
+
+### Key Concepts
+
+- **Dependencies**: Issues can block other issues. `br ready` shows only unblocked work.
+- **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers 0-4, not words)
+- **Types**: task, bug, feature, epic, chore, docs, question
+- **Blocking**: `br dep add <issue> <depends-on>` to add dependencies
+
+### Session Protocol
+
+```bash
+git status              # Check what changed
+git add <files>         # Stage code changes
+br sync --flush-only    # Export beads changes to JSONL
+git commit -m "..."     # Commit everything
+git push                # Push to remote
+```
+
+<!-- end-bv-agent-instructions -->
+
 
 ### `cass` — Session Search and Prompt Archaeology
 
@@ -582,29 +659,6 @@ dcg test "git reset --hard HEAD"
 
 ---
 
-## Health Recheck Commands
-
-Before depending on these tools heavily, re-run:
-
-```bash
-command -v am
-am --help
-curl http://127.0.0.1:8765/api/health
-curl http://127.0.0.1:8765/health/readiness
-cd ~/mcp_agent_mail && uv run python -m mcp_agent_mail.cli doctor check --verbose
-br doctor
-br dep cycles
-bv --version
-bv --robot-triage
-cass index --json
-cass status --json
-ubs doctor
-dcg doctor
-dcg test "git reset --hard HEAD"
-```
-
----
-
 ## Final Standard
 
 Agents working here should optimize for:
@@ -616,3 +670,12 @@ Agents working here should optimize for:
 5. disciplined coordination over solo-agent assumptions
 
 If you are uncertain, stop, inspect more context, and choose the conservative path.
+
+
+
+
+
+
+---
+
+

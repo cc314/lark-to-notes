@@ -190,9 +190,7 @@ def test_reclassify_per_source_separate_tasks(tmp_path: Path) -> None:
     conn.commit()
 
     # Reclassify only the DM source
-    exit_code = run(
-        ["reclassify", "--db", str(db_path), "--source-id", src_dm.source_id]
-    )
+    exit_code = run(["reclassify", "--db", str(db_path), "--source-id", src_dm.source_id])
     assert exit_code == 0
 
     tasks = list_tasks(conn)
@@ -236,9 +234,19 @@ def test_render_per_source_notes_no_overlap(
     content = "Please review the quarterly plan"
     records = [
         _msg("om_shared_dm_1", content, src_dm.source_id, "2026-05-01T10:00:00Z"),
-        _msg("om_shared_dm_2", "TODO: update the sprint board", src_dm.source_id, "2026-05-01T10:01:00Z"),
+        _msg(
+            "om_shared_dm_2",
+            "TODO: update the sprint board",
+            src_dm.source_id,
+            "2026-05-01T10:01:00Z",
+        ),
         _msg("om_shared_grp_1", content, src_grp.source_id, "2026-05-01T10:00:00Z"),
-        _msg("om_shared_grp_2", "Follow up with Alice tomorrow", src_grp.source_id, "2026-05-01T10:02:00Z"),
+        _msg(
+            "om_shared_grp_2",
+            "Follow up with Alice tomorrow",
+            src_grp.source_id,
+            "2026-05-01T10:02:00Z",
+        ),
     ]
     _write_jsonl(raw_dir / "2026-05-01.jsonl", records)
 
@@ -328,15 +336,57 @@ def test_multi_source_health_aggregates(
 
     # 3 messages per source, all clearly actionable
     records: list[dict[str, object]] = [
-        _msg("om_h_dm_1", "Review the onboarding guide by Thursday", src_dm.source_id, "2026-05-01T09:00:00Z"),
-        _msg("om_h_dm_2", "Please follow up with legal team", src_dm.source_id, "2026-05-01T09:01:00Z"),
-        _msg("om_h_dm_3", "TODO: push the hotfix to staging", src_dm.source_id, "2026-05-01T09:02:00Z"),
-        _msg("om_h_grp_1", "Action: update sprint board before standup", src_grp.source_id, "2026-05-01T09:03:00Z"),
-        _msg("om_h_grp_2", "Can you review the PR by EOD?", src_grp.source_id, "2026-05-01T09:04:00Z"),
-        _msg("om_h_grp_3", "Follow up with Alice on the blockers", src_grp.source_id, "2026-05-01T09:05:00Z"),
-        _msg("om_h_doc_1", "TODO: finalize the design spec", src_doc.source_id, "2026-05-01T09:06:00Z"),
-        _msg("om_h_doc_2", "Please review the architecture diagram", src_doc.source_id, "2026-05-01T09:07:00Z"),
-        _msg("om_h_doc_3", "Follow up with the infra team next week", src_doc.source_id, "2026-05-01T09:08:00Z"),
+        _msg(
+            "om_h_dm_1",
+            "Review the onboarding guide by Thursday",
+            src_dm.source_id,
+            "2026-05-01T09:00:00Z",
+        ),
+        _msg(
+            "om_h_dm_2",
+            "Please follow up with legal team",
+            src_dm.source_id,
+            "2026-05-01T09:01:00Z",
+        ),
+        _msg(
+            "om_h_dm_3",
+            "TODO: push the hotfix to staging",
+            src_dm.source_id,
+            "2026-05-01T09:02:00Z",
+        ),
+        _msg(
+            "om_h_grp_1",
+            "Action: update sprint board before standup",
+            src_grp.source_id,
+            "2026-05-01T09:03:00Z",
+        ),
+        _msg(
+            "om_h_grp_2", "Can you review the PR by EOD?", src_grp.source_id, "2026-05-01T09:04:00Z"
+        ),
+        _msg(
+            "om_h_grp_3",
+            "Follow up with Alice on the blockers",
+            src_grp.source_id,
+            "2026-05-01T09:05:00Z",
+        ),
+        _msg(
+            "om_h_doc_1",
+            "TODO: finalize the design spec",
+            src_doc.source_id,
+            "2026-05-01T09:06:00Z",
+        ),
+        _msg(
+            "om_h_doc_2",
+            "Please review the architecture diagram",
+            src_doc.source_id,
+            "2026-05-01T09:07:00Z",
+        ),
+        _msg(
+            "om_h_doc_3",
+            "Follow up with the infra team next week",
+            src_doc.source_id,
+            "2026-05-01T09:08:00Z",
+        ),
     ]
     _write_jsonl(raw_dir / "2026-05-01.jsonl", records)
 
@@ -352,8 +402,10 @@ def test_multi_source_health_aggregates(
         capsys,
         [
             "doctor",
-            "--db", str(db_path),
-            "--fixture-corpus", str(fixture_corpus),
+            "--db",
+            str(db_path),
+            "--fixture-corpus",
+            str(fixture_corpus),
             "--json",
         ],
     )

@@ -111,10 +111,7 @@ def reconcile_cursors(
 
         # Gap detected
         gaps_found += 1
-        detail = (
-            f"source={source_id} stored={stored_cursor!r} "
-            f"latest={state.latest_message_id!r}"
-        )
+        detail = f"source={source_id} stored={stored_cursor!r} latest={state.latest_message_id!r}"
         gap_details.append(detail)
         logger.info(
             "reconcile_gap_detected",

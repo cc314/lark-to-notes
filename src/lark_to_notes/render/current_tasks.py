@@ -65,14 +65,7 @@ def _ct_block_id(item: RenderItem) -> str:
 
 
 def _ct_frontmatter() -> str:
-    return (
-        "---\n"
-        "type: area\n"
-        "tags:\n"
-        "  - current-tasks\n"
-        "  - ltn-managed\n"
-        "---\n"
-    )
+    return "---\ntype: area\ntags:\n  - current-tasks\n  - ltn-managed\n---\n"
 
 
 def _bullet_content(item: RenderItem) -> str:
@@ -261,7 +254,7 @@ def remove_demoted_blocks(
     for block_id in block_ids:
         if not block_id.startswith(_CT_BLOCK_ID_PREFIX):
             continue
-        fingerprint = block_id[len(_CT_BLOCK_ID_PREFIX):]
+        fingerprint = block_id[len(_CT_BLOCK_ID_PREFIX) :]
         if fingerprint in keep_fingerprints:
             continue
         # Remove the block entirely by replacing with empty content and then

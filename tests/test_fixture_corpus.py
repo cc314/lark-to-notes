@@ -32,7 +32,10 @@ class FixtureCorpusTests(unittest.TestCase):
             {"content": "需要 review", "payload": {"updated": False, "deleted": False}},
             {"content": "只中文", "payload": {"updated": True, "deleted": False}},
             {"content": "deleted sample", "payload": {"updated": False, "deleted": True}},
-            {"content": "thread sample", "payload": {"thread_id": "omt_1", "updated": False, "deleted": False}},
+            {
+                "content": "thread sample",
+                "payload": {"thread_id": "omt_1", "updated": False, "deleted": False},
+            },
         ]
         examples = select_fixture_examples(records)
         self.assertIn("english_only", examples)

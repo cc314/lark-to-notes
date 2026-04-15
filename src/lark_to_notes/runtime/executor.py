@@ -15,6 +15,7 @@ from lark_to_notes.runtime.lock import RuntimeLock
 from lark_to_notes.runtime.models import (
     BatchRunResult,
     ReconcileRunResult,
+    RuntimeDaemonResult,
     RuntimeRun,
     RuntimeWorkItem,
 )
@@ -206,6 +207,69 @@ def execute_reconcile_run(
         },
     )
     return ReconcileRunResult(run=completed_run, report=report)
+
+
+def run_background_runtime(
+    conn: sqlite3.Connection,
+    *,
+    command: str,
+    fetch_batch: Callable[[], Iterable[RuntimeWorkItem]],
+    processor: Callable[[RuntimeWorkItem], None],
+    lock_path: Path,
+    retry_policy: RetryPolicy | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+    poll_interval_s: float = 5.0,
+    max_cycles: int | None = None,
+    stop_when_idle: bool = False,
+) -> RuntimeDaemonResult:
+    """Continuously fetch and process batches until the stop condition is met."""
+
+    sleeper = sleep_fn or time.sleep
+    cycle_count = 0
+    idle_cycles = 0
+    items_seen = 0
+    items_processed = 0
+    items_failed = 0
+    queue_depth_peak = 0
+    run_ids: list[str] = []
+
+    while max_cycles is None or cycle_count < max_cycles:
+        cycle_count += 1
+        batch = tuple(fetch_batch())
+        queue_depth_peak = max(queue_depth_peak, len(batch))
+        if not batch:
+            idle_cycles += 1
+            if stop_when_idle:
+                break
+            sleeper(poll_interval_s)
+            continue
+
+        result = execute_work_batch(
+            conn,
+            command=command,
+            items=batch,
+            processor=processor,
+            lock_path=lock_path,
+            retry_policy=retry_policy,
+            sleep_fn=sleeper,
+        )
+        run_ids.append(result.run.run_id)
+        items_seen += result.items_total
+        items_processed += result.items_processed
+        items_failed += result.items_failed
+
+        if max_cycles is None or cycle_count < max_cycles:
+            sleeper(poll_interval_s)
+
+    return RuntimeDaemonResult(
+        cycle_count=cycle_count,
+        idle_cycles=idle_cycles,
+        items_seen=items_seen,
+        items_processed=items_processed,
+        items_failed=items_failed,
+        queue_depth_peak=queue_depth_peak,
+        run_ids=tuple(run_ids),
+    )
 
 
 def _finish_completed_run(

@@ -273,9 +273,7 @@ def test_full_pipeline_100_messages_e2e(
     raw_dir.mkdir()
     vault_root = tmp_path / "vault"
     vault_root.mkdir()
-    fixture_corpus = (
-        Path(__file__).resolve().parents[1] / "raw" / "lark-worker" / "fixture-corpus"
-    )
+    fixture_corpus = Path(__file__).resolve().parents[1] / "raw" / "lark-worker" / "fixture-corpus"
 
     conn = connect(db_path)
     init_db(conn)
@@ -294,8 +292,10 @@ def test_full_pipeline_100_messages_e2e(
     for i in range(100):
         fname = files[i % 4]
         content = (
-            f"Please review item {i}" if i % 3 == 0
-            else f"TODO: follow up on task {i}" if i % 3 == 1
+            f"Please review item {i}"
+            if i % 3 == 0
+            else f"TODO: follow up on task {i}"
+            if i % 3 == 1
             else f"FYI: status update for item {i}"
         )
         records[fname].append(_jsonl_record(f"om_e2e100_{i}", content, src.source_id))
@@ -313,9 +313,7 @@ def test_full_pipeline_100_messages_e2e(
     assert rc == 0, "reclassify failed"
 
     # Step 3: render
-    rc = _run_cli(
-        capsys, ["render", "--db", str(db_path), "--vault-root", str(vault_root)]
-    )
+    rc = _run_cli(capsys, ["render", "--db", str(db_path), "--vault-root", str(vault_root)])
     assert rc == 0, "render failed"
 
     # Step 4: doctor
@@ -323,8 +321,10 @@ def test_full_pipeline_100_messages_e2e(
         capsys,
         [
             "doctor",
-            "--db", str(db_path),
-            "--fixture-corpus", str(fixture_corpus),
+            "--db",
+            str(db_path),
+            "--fixture-corpus",
+            str(fixture_corpus),
         ],
     )
     assert rc == 0, "doctor failed"

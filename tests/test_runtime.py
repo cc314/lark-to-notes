@@ -943,9 +943,7 @@ class TestRunBackgroundRuntime:
     def _make_item(self, key: str = "item-1", source: str = "src-001") -> RuntimeWorkItem:
         return RuntimeWorkItem(source_id=source, item_key=key)
 
-    def test_daemon_stops_when_idle(
-        self, conn: sqlite3.Connection, tmp_path: Path
-    ) -> None:
+    def test_daemon_stops_when_idle(self, conn: sqlite3.Connection, tmp_path: Path) -> None:
         """Empty first batch with stop_when_idle=True exits after exactly 1 cycle."""
 
         result = run_background_runtime(
@@ -965,9 +963,7 @@ class TestRunBackgroundRuntime:
         assert result.queue_depth_peak == 0
         assert result.run_ids == ()
 
-    def test_daemon_runs_max_cycles(
-        self, conn: sqlite3.Connection, tmp_path: Path
-    ) -> None:
+    def test_daemon_runs_max_cycles(self, conn: sqlite3.Connection, tmp_path: Path) -> None:
         """max_cycles=3 with non-empty batches executes exactly 3 cycles."""
         item = self._make_item()
         cycles: list[int] = []
@@ -990,9 +986,7 @@ class TestRunBackgroundRuntime:
         assert len(cycles) == 3
         assert result.idle_cycles == 0
 
-    def test_daemon_accumulates_metrics(
-        self, conn: sqlite3.Connection, tmp_path: Path
-    ) -> None:
+    def test_daemon_accumulates_metrics(self, conn: sqlite3.Connection, tmp_path: Path) -> None:
         """items_seen and items_processed accumulate across cycles."""
         # cycle 1: 2 items, cycle 2: 1 item, cycle 3: empty -> stop
         batch_plan = [[self._make_item("a"), self._make_item("b")], [self._make_item("c")], []]
@@ -1081,9 +1075,7 @@ class TestRunBackgroundRuntime:
         self, conn: sqlite3.Connection, tmp_path: Path
     ) -> None:
         """Items whose processor raises are quarantined in the dead-letter store."""
-        item = RuntimeWorkItem(
-            source_id="src-001", item_key="bad-item", raw_message_id="msg-bad"
-        )
+        item = RuntimeWorkItem(source_id="src-001", item_key="bad-item", raw_message_id="msg-bad")
 
         def boom(_item: RuntimeWorkItem) -> None:
             raise PermanentError("bad payload")
@@ -1132,9 +1124,7 @@ class TestRunBackgroundRuntime:
 
         assert result.queue_depth_peak == 5
 
-    def test_daemon_run_ids_populated(
-        self, conn: sqlite3.Connection, tmp_path: Path
-    ) -> None:
+    def test_daemon_run_ids_populated(self, conn: sqlite3.Connection, tmp_path: Path) -> None:
         """Each non-empty cycle appends a valid UUID run_id to run_ids."""
         import uuid
 

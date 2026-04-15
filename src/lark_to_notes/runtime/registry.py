@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from lark_to_notes.runtime.models import (
     DeadLetter,
@@ -17,6 +18,11 @@ from lark_to_notes.runtime.models import (
     RunStatus,
     RuntimeRun,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from lark_to_notes.runtime.models import RuntimeWorkItem
 
 
 def _utcnow_iso() -> str:
@@ -137,9 +143,7 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> RuntimeRun | None:
     Returns:
         The :class:`RuntimeRun`, or ``None`` if not found.
     """
-    row = conn.execute(
-        "SELECT * FROM runtime_runs WHERE run_id = ?", (run_id,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM runtime_runs WHERE run_id = ?", (run_id,)).fetchone()
     if row is None:
         return None
     return _run_from_row(row)
@@ -286,11 +290,19 @@ def _dl_from_row(row: sqlite3.Row) -> DeadLetter:
 # ---------------------------------------------------------------------------
 
 
-def health_report(conn: sqlite3.Connection) -> HealthReport:
+def health_report(
+    conn: sqlite3.Connection,
+    *,
+    queued_items: Iterable[RuntimeWorkItem] | None = None,
+    now: datetime | None = None,
+) -> HealthReport:
     """Compute a point-in-time health snapshot.
 
     Args:
         conn: An open database connection.
+        queued_items: Optional current queue contents for live lag/depth
+            metrics.
+        now: Optional clock override used for deterministic lag calculations.
 
     Returns:
         A :class:`HealthReport` reflecting the current runtime state.
@@ -351,13 +363,44 @@ def health_report(conn: sqlite3.Connection) -> HealthReport:
         last_run_status = row_last[1]
         last_run_at = row_last[2]
 
+    queue = tuple(queued_items or ())
+    queue_depth = len(queue)
+    lag_seconds = _lag_seconds(queue, now=now)
+
     return HealthReport(
         run_count_total=run_count_total,
         run_count_failed=run_count_failed,
         run_count_running=run_count_running,
         dead_letter_count=dead_letter_count,
+        queue_depth=queue_depth,
         error_rate=error_rate,
         last_run_at=last_run_at,
         last_run_command=last_run_command,
         last_run_status=last_run_status,
+        lag_seconds=lag_seconds,
     )
+
+
+def _lag_seconds(
+    queued_items: tuple[RuntimeWorkItem, ...],
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    queued_times = [
+        parsed
+        for item in queued_items
+        if item.queued_at is not None
+        for parsed in [_parse_queued_at(item.queued_at)]
+        if parsed is not None
+    ]
+    if not queued_times:
+        return None
+    reference = now or datetime.now(UTC)
+    return max((reference - min(queued_times)).total_seconds(), 0.0)
+
+
+def _parse_queued_at(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None

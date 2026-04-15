@@ -13,12 +13,16 @@ from automation.lark_worker.source_access import (
 class SourceAccessTests(unittest.TestCase):
     def test_extract_doc_token_from_url(self) -> None:
         self.assertEqual(
-            extract_doc_token("https://gotocompany.sg.larksuite.com/docx/D5IXd2EQLoZ3yvxY1WBlJi71gmf"),
+            extract_doc_token(
+                "https://gotocompany.sg.larksuite.com/docx/D5IXd2EQLoZ3yvxY1WBlJi71gmf"
+            ),
             "D5IXd2EQLoZ3yvxY1WBlJi71gmf",
         )
 
     def test_extract_doc_token_from_raw_token(self) -> None:
-        self.assertEqual(extract_doc_token("D5IXd2EQLoZ3yvxY1WBlJi71gmf"), "D5IXd2EQLoZ3yvxY1WBlJi71gmf")
+        self.assertEqual(
+            extract_doc_token("D5IXd2EQLoZ3yvxY1WBlJi71gmf"), "D5IXd2EQLoZ3yvxY1WBlJi71gmf"
+        )
 
     def test_summarize_probe_marks_chat_payload_with_messages_as_ok(self) -> None:
         summary = summarize_probe(

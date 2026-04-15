@@ -201,7 +201,13 @@ class TestListBlockIds:
         assert list_block_ids(note) == ["alpha"]
 
     def test_multiple_blocks_in_order(self) -> None:
-        note = wrap_block("first", "a") + "\n" + wrap_block("second", "b") + "\n" + wrap_block("third", "c")
+        note = (
+            wrap_block("first", "a")
+            + "\n"
+            + wrap_block("second", "b")
+            + "\n"
+            + wrap_block("third", "c")
+        )
         assert list_block_ids(note) == ["first", "second", "third"]
 
     def test_ignores_non_block_content(self) -> None:
@@ -567,7 +573,9 @@ class TestRenderCurrentTasksBatch:
             _item(fingerprint="bbb0000000000002", promotion_rec="daily_only", title="Skipped"),
         ]
         results = render_current_tasks(items, tmp_path)
-        eligible_result = next(r for r in results if r.entity_id != "task-0001" or r.outcome != RenderOutcome.SKIPPED)
+        eligible_result = next(
+            r for r in results if r.entity_id != "task-0001" or r.outcome != RenderOutcome.SKIPPED
+        )
         assert eligible_result.outcome in (RenderOutcome.CREATED, RenderOutcome.UPDATED)
 
 
@@ -681,9 +689,7 @@ class TestNoteWriterPipeline:
         # The daily note should have a wikilink to the raw note
         assert "[[" in text
 
-    def test_source_note_path_not_propagated_when_raw_fails(
-        self, tmp_path: Path
-    ) -> None:
+    def test_source_note_path_not_propagated_when_raw_fails(self, tmp_path: Path) -> None:
         import os
 
         # Make raw/ read-only so render_raw_note fails with PermissionError,

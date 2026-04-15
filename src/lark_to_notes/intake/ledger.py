@@ -10,12 +10,15 @@ is observable and diagnosable.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from lark_to_notes.intake.models import RawMessage
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow_iso() -> str:
@@ -65,7 +68,17 @@ def insert_raw_message(conn: sqlite3.Connection, message: RawMessage) -> bool:
         ),
     )
     conn.commit()
-    return cursor.rowcount > 0
+    inserted = cursor.rowcount > 0
+    logger.debug(
+        "insert_raw_message",
+        extra={
+            "message_id": message.message_id,
+            "source_id": message.source_id,
+            "source_type": message.source_type,
+            "inserted": inserted,
+        },
+    )
+    return inserted
 
 
 def get_raw_message(conn: sqlite3.Connection, message_id: str) -> RawMessage | None:

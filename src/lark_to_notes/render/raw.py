@@ -54,14 +54,7 @@ def _frontmatter(item: RenderItem) -> str:
         tags.append(f"confidence-{item.confidence_band}")
     tags_yaml = "\n".join(f"  - {t}" for t in tags)
     published = item.event_date or ""
-    return (
-        "---\n"
-        "type: raw\n"
-        "source: lark\n"
-        f"published: {published}\n"
-        f"tags:\n{tags_yaml}\n"
-        "---\n"
-    )
+    return f"---\ntype: raw\nsource: lark\npublished: {published}\ntags:\n{tags_yaml}\n---\n"
 
 
 def _body_block(item: RenderItem) -> str:
@@ -123,28 +116,29 @@ def render_raw_note(
     note_path = raw_dir / note_name
     block_id = _raw_block_id(item)
 
-    logger.debug(
-        "render_raw_note",
-        extra={
-            "target_path": str(note_path),
-            "block_id": block_id,
-            "entity_id": item.task_id,
-            "surface": RenderSurface.RAW,
-        },
-    )
-
     try:
         if note_path.exists():
             existing = note_path.read_text(encoding="utf-8")
             updated = replace_block(existing, block_id, _body_block(item))
             if updated == existing:
-                return RenderResult(
+                result = RenderResult(
                     surface=RenderSurface.RAW,
                     outcome=RenderOutcome.SKIPPED,
                     target_path=str(note_path),
                     block_id=block_id,
                     entity_id=item.task_id,
                 )
+                logger.debug(
+                    "render_raw_note",
+                    extra={
+                        "target_path": str(note_path),
+                        "block_id": block_id,
+                        "entity_id": item.task_id,
+                        "surface": RenderSurface.RAW,
+                        "outcome": result.outcome,
+                    },
+                )
+                return result
             note_path.write_text(updated, encoding="utf-8")
             outcome = RenderOutcome.UPDATED
         else:
@@ -179,10 +173,21 @@ def render_raw_note(
             error=str(exc),
         )
 
-    return RenderResult(
+    result = RenderResult(
         surface=RenderSurface.RAW,
         outcome=outcome,
         target_path=str(note_path),
         block_id=block_id,
         entity_id=item.task_id,
     )
+    logger.debug(
+        "render_raw_note",
+        extra={
+            "target_path": str(note_path),
+            "block_id": block_id,
+            "entity_id": item.task_id,
+            "surface": RenderSurface.RAW,
+            "outcome": result.outcome,
+        },
+    )
+    return result

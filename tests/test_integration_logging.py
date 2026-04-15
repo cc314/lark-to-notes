@@ -27,11 +27,16 @@ import logging
 import sys
 from collections.abc import Generator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import structlog
 
 from lark_to_notes.logging import configure_logging
+
+if TYPE_CHECKING:
+    from lark_to_notes.intake.models import RawMessage
+    from lark_to_notes.render.models import RenderItem
 
 # ---------------------------------------------------------------------------
 # Capture helper
@@ -74,6 +79,25 @@ def _containing(logs: list[dict[str, object]], substr: str) -> list[dict[str, ob
     return [rec for rec in logs if substr in str(rec.get("event", ""))]
 
 
+def _raw_message(message_id: str = "om_log_ledger_1") -> RawMessage:
+    from lark_to_notes.intake.models import RawMessage
+
+    return RawMessage(
+        message_id=message_id,
+        source_id="dm:ou_log",
+        source_type="dm_user",
+        chat_id="ou_chat_log",
+        chat_type="p2p",
+        sender_id="ou_sender_log",
+        sender_name="Logger",
+        direction="incoming",
+        created_at="2026-05-01T10:00:00Z",
+        content="Please review the launch checklist",
+        payload={"content": "Please review the launch checklist"},
+        ingested_at="2026-05-01T10:00:00Z",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Autouse fixture: always restore logging state after each test
 # ---------------------------------------------------------------------------
@@ -107,7 +131,7 @@ def _render_item(
     confidence_band: str = "high",
     reason_code: str = "explicit_task_keyword",
     status: str = "open",
-) -> object:
+) -> RenderItem:
     from lark_to_notes.render.models import RenderItem
 
     return RenderItem(
@@ -119,21 +143,45 @@ def _render_item(
         confidence_band=confidence_band,
         task_class=task_class,
         status=status,
-        summary=None,
-        assignee_refs=[],
+        summary="",
+        assignee_refs=(),
         due_at=None,
         source_message_id=None,
-        event_date=event_date,
+        event_date=event_date or "",
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 1: classify_with_routing emits log on LLM escalation skip
+# Test 1: intake ledger emits a structured insert log
+# ---------------------------------------------------------------------------
+
+
+def test_intake_ledger_emits_insert_log(tmp_path: Path) -> None:
+    """insert_raw_message emits a structured event with the inserted message ID."""
+    from lark_to_notes.intake.ledger import insert_raw_message
+    from lark_to_notes.storage.db import connect, init_db
+
+    conn = connect(tmp_path / "state.db")
+    init_db(conn)
+    message = _raw_message()
+
+    logs = _run_and_capture(lambda: insert_raw_message(conn, message))
+
+    matching = _matching(logs, "insert_raw_message")
+    assert matching, f"expected 'insert_raw_message' event; got: {_events(logs)}"
+    evt = matching[0]
+    assert evt["message_id"] == "om_log_ledger_1"
+    assert evt["source_id"] == "dm:ou_log"
+    assert evt["inserted"] is True
+
+
+# ---------------------------------------------------------------------------
+# Test 2: classify_with_routing emits log on LLM escalation skip
 # ---------------------------------------------------------------------------
 
 
 def test_classify_emits_log_on_escalation_skip() -> None:
-    """classify_with_routing logs 'llm_escalation_skipped' with message_id field.
+    """classify_with_routing logs an escalation-skip event with classifier context.
 
     A very long low-signal message triggers LOW confidence and escalation
     attempt.  With no provider, the router logs the skip and falls back.
@@ -153,14 +201,15 @@ def test_classify_emits_log_on_escalation_skip() -> None:
 
     logs = _run_and_capture(lambda: classify_with_routing(inp, llm_provider=None))
 
-    matching = _containing(logs, "llm_escalation_skipped")
+    matching = _matching(logs, "llm_escalation_skipped")
     assert matching, f"expected 'llm_escalation_skipped' event in: {_events(logs)}"
     assert "message_id" in matching[0], f"missing 'message_id' field in: {matching[0]}"
     assert matching[0]["message_id"] == "om_log_test_classify"
+    assert matching[0]["confidence_band"] == "low"
 
 
 # ---------------------------------------------------------------------------
-# Test 2: render_raw_note emits debug log with required fields
+# Test 3: render_raw_note emits debug log with required fields
 # ---------------------------------------------------------------------------
 
 
@@ -169,7 +218,7 @@ def test_render_raw_note_emits_log_with_fields(tmp_path: Path) -> None:
     from lark_to_notes.render.raw import render_raw_note
 
     item = _render_item(task_id="raw-log-id-001", fingerprint="raw-log-fp-001")
-    logs = _run_and_capture(lambda: render_raw_note(item, tmp_path))  # type: ignore[arg-type]
+    logs = _run_and_capture(lambda: render_raw_note(item, tmp_path))
 
     matching = _matching(logs, "render_raw_note")
     assert matching, f"expected 'render_raw_note' event; got events: {_events(logs)}"
@@ -177,10 +226,11 @@ def test_render_raw_note_emits_log_with_fields(tmp_path: Path) -> None:
     assert "target_path" in evt, f"missing 'target_path' in: {evt}"
     assert "entity_id" in evt, f"missing 'entity_id' in: {evt}"
     assert evt["entity_id"] == "raw-log-id-001"
+    assert evt["outcome"] == "created"
 
 
 # ---------------------------------------------------------------------------
-# Test 3: render_daily_note emits debug log with date field
+# Test 4: render_daily_note emits debug log with date field
 # ---------------------------------------------------------------------------
 
 
@@ -193,17 +243,18 @@ def test_render_daily_note_emits_log_with_date(tmp_path: Path) -> None:
         fingerprint="daily-log-fp-001",
         event_date="2026-05-02",
     )
-    logs = _run_and_capture(lambda: render_daily_note(item, tmp_path))  # type: ignore[arg-type]
+    logs = _run_and_capture(lambda: render_daily_note(item, tmp_path))
 
     matching = _matching(logs, "render_daily_note")
     assert matching, f"expected 'render_daily_note' event; got: {_events(logs)}"
     evt = matching[0]
     assert "date" in evt, f"missing 'date' field in: {evt}"
     assert evt["date"] == "2026-05-02"
+    assert evt["outcome"] == "created"
 
 
 # ---------------------------------------------------------------------------
-# Test 4: render_current_tasks_item emits log with promotion_rec field
+# Test 5: render_current_tasks_item emits log with promotion_rec field
 # ---------------------------------------------------------------------------
 
 
@@ -216,9 +267,7 @@ def test_render_current_tasks_emits_log_with_promotion_rec(tmp_path: Path) -> No
         fingerprint="ct-log-fp-001",
         promotion_rec="current_tasks",
     )
-    logs = _run_and_capture(
-        lambda: render_current_tasks_item(item, tmp_path)  # type: ignore[arg-type]
-    )
+    logs = _run_and_capture(lambda: render_current_tasks_item(item, tmp_path))
 
     matching = _matching(logs, "render_current_tasks_item")
     assert matching, f"expected 'render_current_tasks_item' event; got: {_events(logs)}"
@@ -228,7 +277,7 @@ def test_render_current_tasks_emits_log_with_promotion_rec(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# Test 5: NoteWriter.render_raw emits INFO log with outcome
+# Test 6: NoteWriter.render_raw emits INFO log with outcome
 # ---------------------------------------------------------------------------
 
 
@@ -238,7 +287,7 @@ def test_note_writer_emits_info_log_with_outcome(tmp_path: Path) -> None:
 
     writer = NoteWriter(vault_root=tmp_path)
     item = _render_item(task_id="writer-log-id-001", fingerprint="writer-log-fp-001")
-    logs = _run_and_capture(lambda: writer.render_raw(item))  # type: ignore[arg-type]
+    logs = _run_and_capture(lambda: writer.render_raw(item))
 
     matching = _matching(logs, "note_writer_raw")
     assert matching, f"expected 'note_writer_raw' event; got: {_events(logs)}"
@@ -248,7 +297,7 @@ def test_note_writer_emits_info_log_with_outcome(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 6: execute_work_batch emits start and processed log events
+# Test 7: execute_work_batch emits start and processed log events
 # ---------------------------------------------------------------------------
 
 
@@ -293,12 +342,16 @@ def test_runtime_batch_emits_start_and_processed_events(tmp_path: Path) -> None:
     )
     # Both events must carry run_id and item_key fields.
     start_evt = next(rec for rec in logs if rec.get("event") == "runtime_batch_item_start")
+    processed_evt = next(rec for rec in logs if rec.get("event") == "runtime_batch_item_processed")
     assert "run_id" in start_evt
+    assert start_evt["source_id"] == "dm:log_batch_test"
     assert start_evt["item_key"] == "om_batch_001"
+    assert processed_evt["source_id"] == "dm:log_batch_test"
+    assert processed_evt["item_key"] == "om_batch_001"
 
 
 # ---------------------------------------------------------------------------
-# Test 7: reconcile_cursors emits log event for each checked source
+# Test 8: reconcile_cursors emits log event for each checked source
 # ---------------------------------------------------------------------------
 
 
@@ -337,25 +390,28 @@ def test_reconcile_cursor_up_to_date_emits_log(tmp_path: Path) -> None:
     logs = _run_and_capture(lambda: reconcile_cursors(conn, source_states))
 
     matching = _matching(logs, "reconcile_cursor_up_to_date")
-    assert matching, (
-        f"expected 'reconcile_cursor_up_to_date' event; got: {_events(logs)}"
-    )
+    assert matching, f"expected 'reconcile_cursor_up_to_date' event; got: {_events(logs)}"
     assert matching[0]["source_id"] == source.source_id
 
 
 # ---------------------------------------------------------------------------
-# Test 8: classify event appears before render event in full pipeline log order
+# Test 9: ledger event appears before classify, classify before render
 # ---------------------------------------------------------------------------
 
 
-def test_full_pipeline_classify_before_render_ordering(tmp_path: Path) -> None:
-    """Classify log event must appear before the first render log event."""
+def test_full_pipeline_ledger_before_classify_before_render_ordering(tmp_path: Path) -> None:
+    """Ledger capture must occur before classify, and classify before render."""
     from lark_to_notes.distill.models import DistillInput
     from lark_to_notes.distill.routing import classify_with_routing
+    from lark_to_notes.intake.ledger import insert_raw_message
     from lark_to_notes.render.raw import render_raw_note
+    from lark_to_notes.storage.db import connect, init_db
 
     vault_root = tmp_path / "vault"
     vault_root.mkdir()
+    conn = connect(tmp_path / "state.db")
+    init_db(conn)
+    message = _raw_message("om_order_test")
 
     # Use a LOW-confidence message so classify_with_routing emits at least one log event.
     inp = DistillInput(
@@ -378,8 +434,9 @@ def test_full_pipeline_classify_before_render_ordering(tmp_path: Path) -> None:
     sys.stderr = buf
     configure_logging("DEBUG", json_logs=True)
     try:
+        insert_raw_message(conn, message)
         classify_with_routing(inp, llm_provider=None)
-        render_raw_note(item, vault_root)  # type: ignore[arg-type]
+        render_raw_note(item, vault_root)
     finally:
         sys.stderr = old_stderr
         configure_logging("WARNING")
@@ -393,13 +450,19 @@ def test_full_pipeline_classify_before_render_ordering(tmp_path: Path) -> None:
         with contextlib.suppress(json.JSONDecodeError):
             logs.append(json.loads(raw_line))
 
+    ledger_indices = [i for i, rec in enumerate(logs) if rec.get("event") == "insert_raw_message"]
     classify_indices = [
-        i for i, rec in enumerate(logs) if "llm_escalation_skipped" in str(rec.get("event", ""))
+        i for i, rec in enumerate(logs) if rec.get("event") == "llm_escalation_skipped"
     ]
     render_indices = [i for i, rec in enumerate(logs) if rec.get("event") == "render_raw_note"]
 
+    assert ledger_indices, "no insert_raw_message log event found"
     assert classify_indices, "no classify log event found"
     assert render_indices, "no render_raw_note log event found"
+    assert min(ledger_indices) < min(classify_indices), (
+        f"ledger event (index {min(ledger_indices)}) must appear before "
+        f"classify event (index {min(classify_indices)})"
+    )
     assert min(classify_indices) < min(render_indices), (
         f"classify event (index {min(classify_indices)}) must appear before "
         f"render event (index {min(render_indices)})"

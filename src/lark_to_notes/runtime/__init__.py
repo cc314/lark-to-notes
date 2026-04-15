@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from lark_to_notes.runtime.executor import execute_reconcile_run, execute_work_batch
+from lark_to_notes.runtime.executor import (
+    execute_reconcile_run,
+    execute_work_batch,
+    run_background_runtime,
+)
 from lark_to_notes.runtime.lock import LockAcquisitionError, RuntimeLock
 from lark_to_notes.runtime.models import (
     BatchRunResult,
@@ -11,6 +15,7 @@ from lark_to_notes.runtime.models import (
     ReconcileReport,
     ReconcileRunResult,
     RunStatus,
+    RuntimeDaemonResult,
     RuntimeRun,
     RuntimeWorkItem,
 )
@@ -37,6 +42,7 @@ __all__ = [
     "ReconcileRunResult",
     "RetryPolicy",
     "RunStatus",
+    "RuntimeDaemonResult",
     "RuntimeLock",
     "RuntimeRun",
     "RuntimeWorkItem",
@@ -51,5 +57,6 @@ __all__ = [
     "list_runs",
     "quarantine_item",
     "reconcile_cursors",
+    "run_background_runtime",
     "start_run",
 ]

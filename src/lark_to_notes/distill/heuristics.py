@@ -254,6 +254,7 @@ class HeuristicClassifier:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _excerpt(text: str, start: int, end: int, window: int = 60) -> str:
     left = max(0, start - window)
     right = min(len(text), end + window)

@@ -15,6 +15,7 @@ are treated as disabled (no limit enforced).
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -24,11 +25,14 @@ from lark_to_notes.budget.models import (
     FallbackReason,
     ProviderRoute,
     QualityMetrics,
+    UsageRecord,
 )
 from lark_to_notes.budget.store import (
     get_content_cache,
     get_day_budget_snapshot,
     get_run_budget_snapshot,
+    put_content_cache,
+    record_usage,
     rollup_quality_metrics,
 )
 
@@ -149,6 +153,27 @@ class BudgetEnforcer:
             scoped to the date.
         """
         return get_day_budget_snapshot(self._conn, date_str)
+
+    def get_cached_result(self, cache_key: str) -> str | None:
+        """Return a cached classification payload if it is still valid."""
+        return get_content_cache(self._conn, cache_key)
+
+    def put_cached_result(self, cache_key: str, result_json: str) -> None:
+        """Persist a cached classification payload when caching is enabled."""
+        if self._policy.cache_ttl_seconds <= 0:
+            return
+        put_content_cache(
+            self._conn,
+            cache_key,
+            result_json,
+            ttl_seconds=self._policy.cache_ttl_seconds,
+        )
+
+    def record_usage(self, record: UsageRecord) -> None:
+        """Persist one usage record for routing and operator inspection."""
+        payload = asdict(record)
+        payload["fallback_reason"] = str(record.fallback_reason)
+        record_usage(self._conn, payload)
 
 
 def _check_snap_against_policy(

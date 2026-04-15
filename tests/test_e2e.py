@@ -123,9 +123,9 @@ def test_full_pipeline_with_explicit_task_keyword(
     capsys.readouterr()
 
     tasks = list_tasks(conn)
-    assert any(
-        t.task_class in ("task", "follow_up") for t in tasks
-    ), "expected at least one task/follow_up from explicit keyword"
+    assert any(t.task_class in ("task", "follow_up") for t in tasks), (
+        "expected at least one task/follow_up from explicit keyword"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +184,12 @@ def test_replay_is_idempotent(
     tasks_after_second = list_tasks(conn)
     notes_after_second = list((vault_root / "raw").glob("*.md"))
 
-    assert len(tasks_after_second) == len(tasks_after_first), "replay must not create duplicate tasks"
-    assert len(notes_after_second) == len(notes_after_first), "re-render must not create duplicate notes"
+    assert len(tasks_after_second) == len(tasks_after_first), (
+        "replay must not create duplicate tasks"
+    )
+    assert len(notes_after_second) == len(notes_after_first), (
+        "re-render must not create duplicate notes"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +273,8 @@ def test_replay_skips_malformed_jsonl_records(
     }
     content = (
         "this is not valid JSON\n"
-        + json.dumps(good_record) + "\n"
+        + json.dumps(good_record)
+        + "\n"
         + '{"incomplete":\n'  # truncated JSON
     )
     (raw_dir / "mixed.jsonl").write_text(content, encoding="utf-8")
@@ -356,8 +361,16 @@ def test_feedback_import_changes_task_class_and_rerenders(
 
     # Re-render with the overridden class — should complete without error.
     rc = run(
-        ["render", "--db", str(db_path), "--vault-root", str(vault_root),
-         "--status", "open", "--json"]
+        [
+            "render",
+            "--db",
+            str(db_path),
+            "--vault-root",
+            str(vault_root),
+            "--status",
+            "open",
+            "--json",
+        ]
     )
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
@@ -408,12 +421,8 @@ def test_reclassify_source_isolation(
     _seed_source(conn, "ou_src_a")
     _seed_source(conn, "ou_src_b")
 
-    msg_a = _make_raw_message(
-        "om_iso_a1", "Review the doc", source_id="dm:ou_src_a"
-    )
-    msg_b = _make_raw_message(
-        "om_iso_b1", "Reply to the thread", source_id="dm:ou_src_b"
-    )
+    msg_a = _make_raw_message("om_iso_a1", "Review the doc", source_id="dm:ou_src_a")
+    msg_b = _make_raw_message("om_iso_b1", "Reply to the thread", source_id="dm:ou_src_b")
     insert_raw_message(conn, msg_a)
     insert_raw_message(conn, msg_b)
     conn.commit()

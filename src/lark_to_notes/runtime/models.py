@@ -84,23 +84,29 @@ class HealthReport:
         run_count_running:   Runs currently in RUNNING state (should be 0
                              or 1 under the single-writer model).
         dead_letter_count:   Items currently quarantined.
+        queue_depth:         Current number of queued work items waiting to be
+                             processed.
         last_run_at:         ISO-8601 UTC timestamp of the most recent run,
-                             or ``None`` if no runs have been recorded.
+                              or ``None`` if no runs have been recorded.
         last_run_command:    Command name of the most recent run.
         last_run_status:     Status of the most recent run.
+        lag_seconds:         Age in seconds of the oldest queued work item, or
+                             ``None`` when queue timing is unavailable.
         error_rate:          Fraction of completed runs that failed
-                             (``items_failed / (items_processed + items_failed)``
-                             across all completed runs, clamped to ``[0, 1]``).
+                              (``items_failed / (items_processed + items_failed)``
+                              across all completed runs, clamped to ``[0, 1]``).
     """
 
     run_count_total: int
     run_count_failed: int
     run_count_running: int
     dead_letter_count: int
+    queue_depth: int
     error_rate: float
     last_run_at: str | None = None
     last_run_command: str | None = None
     last_run_status: str | None = None
+    lag_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,12 +141,15 @@ class RuntimeWorkItem:
         item_key:        Stable identifier for the work item within the batch.
         raw_message_id:  Optional raw-message identifier when the work item
                          comes from the intake ledger.
+        queued_at:       Optional ISO-8601 UTC timestamp of when the item
+                         entered the queue, used for lag metrics.
         payload:         Optional opaque value passed through to the processor.
     """
 
     source_id: str
     item_key: str
     raw_message_id: str | None = None
+    queued_at: str | None = None
     payload: object | None = None
 
 
@@ -173,3 +182,16 @@ class ReconcileRunResult:
 
     run: RuntimeRun
     report: ReconcileReport
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeDaemonResult:
+    """Summary of a continuous background runtime loop."""
+
+    cycle_count: int
+    idle_cycles: int
+    items_seen: int
+    items_processed: int
+    items_failed: int
+    queue_depth_peak: int
+    run_ids: tuple[str, ...] = ()

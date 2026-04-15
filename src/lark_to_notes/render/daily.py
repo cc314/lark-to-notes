@@ -53,14 +53,7 @@ def _daily_block_id(item: RenderItem) -> str:
 
 
 def _daily_frontmatter(date: str) -> str:
-    return (
-        "---\n"
-        "type: daily\n"
-        f"date: {date}\n"
-        "tags:\n"
-        "  - daily\n"
-        "---\n"
-    )
+    return f"---\ntype: daily\ndate: {date}\ntags:\n  - daily\n---\n"
 
 
 def _bullet_content(item: RenderItem) -> str:
@@ -121,16 +114,6 @@ def render_daily_note(
     note_path = daily_dir / f"{effective_date}.md"
     block_id = _daily_block_id(item)
 
-    logger.debug(
-        "render_daily_note",
-        extra={
-            "target_path": str(note_path),
-            "block_id": block_id,
-            "entity_id": item.task_id,
-            "date": effective_date,
-        },
-    )
-
     try:
         if note_path.exists():
             existing = note_path.read_text(encoding="utf-8")
@@ -139,13 +122,24 @@ def render_daily_note(
                 existing = existing.rstrip("\n") + "\n\n" + _DAILY_SECTION_HEADER
             updated = replace_block(existing, block_id, _bullet_content(item))
             if updated == existing:
-                return RenderResult(
+                result = RenderResult(
                     surface=RenderSurface.DAILY,
                     outcome=RenderOutcome.SKIPPED,
                     target_path=str(note_path),
                     block_id=block_id,
                     entity_id=item.task_id,
                 )
+                logger.debug(
+                    "render_daily_note",
+                    extra={
+                        "target_path": str(note_path),
+                        "block_id": block_id,
+                        "entity_id": item.task_id,
+                        "date": effective_date,
+                        "outcome": result.outcome,
+                    },
+                )
+                return result
             note_path.write_text(updated, encoding="utf-8")
             outcome = RenderOutcome.UPDATED
         else:
@@ -187,10 +181,21 @@ def render_daily_note(
             error=str(exc),
         )
 
-    return RenderResult(
+    result = RenderResult(
         surface=RenderSurface.DAILY,
         outcome=outcome,
         target_path=str(note_path),
         block_id=block_id,
         entity_id=item.task_id,
     )
+    logger.debug(
+        "render_daily_note",
+        extra={
+            "target_path": str(note_path),
+            "block_id": block_id,
+            "entity_id": item.task_id,
+            "date": effective_date,
+            "outcome": result.outcome,
+        },
+    )
+    return result

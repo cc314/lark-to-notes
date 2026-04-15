@@ -918,9 +918,7 @@ def test_feedback_import_bad_yaml_returns_rc1(
     artifact_path = tmp_path / "bad.yaml"
     artifact_path.write_text(": broken: yaml: [unclosed", encoding="utf-8")
 
-    exit_code = run(
-        ["feedback", "import", str(artifact_path), "--db", str(db_path), "--json"]
-    )
+    exit_code = run(["feedback", "import", str(artifact_path), "--db", str(db_path), "--json"])
 
     out = capsys.readouterr().out
     payload = json.loads(out)
@@ -954,9 +952,7 @@ def test_feedback_import_invalid_version_returns_rc1(
     artifact_path = tmp_path / "ver99.yaml"
     artifact_path.write_text("version: 99\ntasks: {}\nsource_items: {}\n", encoding="utf-8")
 
-    exit_code = run(
-        ["feedback", "import", str(artifact_path), "--db", str(db_path), "--json"]
-    )
+    exit_code = run(["feedback", "import", str(artifact_path), "--db", str(db_path), "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 1
@@ -987,9 +983,7 @@ def test_feedback_import_unknown_task_id_applies_zero_tasks(
         encoding="utf-8",
     )
 
-    exit_code = run(
-        ["feedback", "import", str(artifact_path), "--db", str(db_path), "--json"]
-    )
+    exit_code = run(["feedback", "import", str(artifact_path), "--db", str(db_path), "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 1
@@ -1022,9 +1016,7 @@ def test_render_unwritable_vault_exits_nonzero(
 
     os.chmod(vault_root, 0o555)
     try:
-        exit_code = run(
-            ["render", "--db", str(db_path), "--vault-root", str(vault_root), "--json"]
-        )
+        exit_code = run(["render", "--db", str(db_path), "--vault-root", str(vault_root), "--json"])
         payload = json.loads(capsys.readouterr().out)
     finally:
         os.chmod(vault_root, 0o755)
@@ -1141,7 +1133,13 @@ def test_doctor_json_has_all_expected_keys(
     assert exit_code == 0
     for key in ("status", "schema_version", "db_path", "fixture_corpus", "replay", "runtime"):
         assert key in payload, f"missing key: {key!r}"
-    for key in ("file_count", "total_records", "inserted_records", "db_record_count", "matches_manifest"):
+    for key in (
+        "file_count",
+        "total_records",
+        "inserted_records",
+        "db_record_count",
+        "matches_manifest",
+    ):
         assert key in payload["replay"], f"missing replay key: {key!r}"
     for key in ("record_count", "scenario_count", "missing_scenarios", "source_access_surfaces"):
         assert key in payload["fixture_corpus"], f"missing fixture_corpus key: {key!r}"
