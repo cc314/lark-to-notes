@@ -4,12 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from automation.lark_worker.fixture_corpus import (
-    copy_source_access_artifacts,
+from lark_to_notes.distill.heuristics import (
     has_han,
     is_english_only,
     is_mixed_language,
     is_threaded_record,
+)
+from lark_to_notes.testing.fixtures import (
+    copy_source_access_artifacts,
     select_fixture_examples,
 )
 

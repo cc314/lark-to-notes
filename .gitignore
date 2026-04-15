@@ -5,3 +5,6 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# Runtime database and WAL files
+var/

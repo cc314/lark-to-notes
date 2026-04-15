@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from lark_to_notes.distill.models import (
     ClassifierResult,
@@ -19,6 +20,41 @@ from lark_to_notes.distill.models import (
     PromotionRec,
     TaskClass,
 )
+
+# ---------------------------------------------------------------------------
+# Language detection helpers
+# ---------------------------------------------------------------------------
+
+HAN_RE = re.compile(r"[\u4e00-\u9fff]")
+LATIN_RE = re.compile(r"[A-Za-z]")
+
+
+def has_han(content: str) -> bool:
+    """Return ``True`` if *content* contains at least one CJK unified ideograph."""
+    return bool(HAN_RE.search(content))
+
+
+def is_mixed_language(content: str) -> bool:
+    """Return ``True`` if *content* contains both Han characters and Latin letters."""
+    return has_han(content) and bool(LATIN_RE.search(content))
+
+
+def is_english_only(content: str) -> bool:
+    """Return ``True`` if *content* contains Latin letters but no Han characters."""
+    return bool(LATIN_RE.search(content)) and not has_han(content)
+
+
+def is_threaded_record(record: dict[str, Any]) -> bool:
+    """Return ``True`` if the raw JSONL *record* belongs to a thread.
+
+    A record is considered threaded if its ``payload`` carries a non-empty
+    ``thread_id`` or a non-empty ``thread_replies`` list.
+    """
+    payload = record.get("payload", {})
+    if payload.get("thread_id"):
+        return True
+    return bool(payload.get("thread_replies"))
+
 
 # ---------------------------------------------------------------------------
 # Pattern definitions

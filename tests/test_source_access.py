@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from automation.lark_worker.source_access import (
+from lark_to_notes.testing.fixtures import (
     ProbeRecord,
     build_report_manifest,
     extract_doc_token,

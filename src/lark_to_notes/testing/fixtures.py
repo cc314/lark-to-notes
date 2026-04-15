@@ -1,11 +1,22 @@
-"""Reusable loaders for the checked-in fixture corpus."""
+"""Reusable loaders for the checked-in fixture corpus.
+
+Also contains fixture-build helpers (``iter_raw_records``,
+``select_fixture_examples``, ``copy_source_access_artifacts``) and source-
+access probe utilities (``ProbeRecord``, ``summarize_probe``,
+``build_report_manifest``, ``extract_doc_token``) that were used to
+generate the checked-in fixture data.
+"""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+import shutil
+from collections import Counter
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lark_to_notes.intake.ledger import count_raw_messages
 from lark_to_notes.intake.replay import replay_jsonl_dir
@@ -242,3 +253,247 @@ def _expect_int(payload: dict[str, object], key: str) -> int:
     if not isinstance(value, int):
         raise FixtureCorpusError(f"Expected int for {key}")
     return value
+
+
+# ---------------------------------------------------------------------------
+# Fixture corpus build helpers
+# ---------------------------------------------------------------------------
+
+SCENARIOS = (
+    "english_only",
+    "han",
+    "mixed",
+    "updated",
+    "deleted",
+    "threaded",
+)
+
+
+def iter_raw_records(raw_dir: Path) -> Iterable[dict[str, Any]]:
+    """Yield every JSONL record from ``*.jsonl`` files in *raw_dir*.
+
+    Each yielded dict has two extra keys injected for traceability:
+    ``_fixture_source_path`` and ``_fixture_line_number``.
+    """
+    for path in sorted(raw_dir.glob("*.jsonl")):
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            payload["_fixture_source_path"] = str(path)
+            payload["_fixture_line_number"] = line_number
+            yield payload
+
+
+def summarize_raw_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a statistical summary of *records* for use in corpus manifests."""
+    from lark_to_notes.distill.heuristics import (
+        has_han,
+        is_english_only,
+        is_mixed_language,
+        is_threaded_record,
+    )
+
+    msg_types: Counter[str] = Counter()
+    summary: dict[str, Any] = {
+        "record_count": len(records),
+        "updated": 0,
+        "deleted": 0,
+        "threaded": 0,
+        "han": 0,
+        "mixed": 0,
+        "english_only": 0,
+    }
+
+    for record in records:
+        content = record.get("content", "")
+        payload = record.get("payload", {})
+        msg_types[str(payload.get("msg_type", "unknown"))] += 1
+        if payload.get("updated") is True:
+            summary["updated"] += 1
+        if payload.get("deleted") is True:
+            summary["deleted"] += 1
+        if is_threaded_record(record):
+            summary["threaded"] += 1
+        if has_han(content):
+            summary["han"] += 1
+        if is_mixed_language(content):
+            summary["mixed"] += 1
+        if is_english_only(content):
+            summary["english_only"] += 1
+
+    summary["msg_types"] = dict(sorted(msg_types.items()))
+    return summary
+
+
+def select_fixture_examples(
+    records: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Pick one representative record for each scenario in :data:`SCENARIOS`."""
+    from lark_to_notes.distill.heuristics import (
+        has_han,
+        is_english_only,
+        is_mixed_language,
+        is_threaded_record,
+    )
+
+    selected: dict[str, dict[str, Any]] = {}
+    for record in records:
+        content = record.get("content", "")
+        payload = record.get("payload", {})
+        if "english_only" not in selected and is_english_only(content):
+            selected["english_only"] = record
+        if "han" not in selected and has_han(content):
+            selected["han"] = record
+        if "mixed" not in selected and is_mixed_language(content):
+            selected["mixed"] = record
+        if "updated" not in selected and payload.get("updated") is True:
+            selected["updated"] = record
+        if "deleted" not in selected and payload.get("deleted") is True:
+            selected["deleted"] = record
+        if "threaded" not in selected and is_threaded_record(record):
+            selected["threaded"] = record
+        if len(selected) == len(SCENARIOS):
+            break
+    return selected
+
+
+def copy_source_access_artifacts(
+    source_access_dir: Path | None,
+    destination_dir: Path,
+) -> list[str]:
+    """Copy source-access JSON artifacts into *destination_dir*.
+
+    Returns a list of relative paths (relative to ``destination_dir.parent``)
+    of the copied files.
+    """
+    if source_access_dir is None or not source_access_dir.exists():
+        return []
+
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+
+    report_path = source_access_dir / "source-access-report.json"
+    if not report_path.exists():
+        return copied
+
+    target = destination_dir / report_path.name
+    shutil.copy2(report_path, target)
+    copied.append(target.relative_to(destination_dir.parent).as_posix())
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    for probe in report.get("probes", []):
+        artifact_relpath = probe.get("artifact_relpath")
+        if not artifact_relpath:
+            continue
+        artifact_path = source_access_dir / artifact_relpath
+        if not artifact_path.exists():
+            continue
+        probe_target = destination_dir / artifact_path.name
+        shutil.copy2(artifact_path, probe_target)
+        copied.append(probe_target.relative_to(destination_dir.parent).as_posix())
+
+    return copied
+
+
+# ---------------------------------------------------------------------------
+# Source-access probe utilities
+# ---------------------------------------------------------------------------
+
+_CHAT_SURFACES = {"dm_chat_messages", "group_chat_messages"}
+_DOC_TOKEN_PATTERN = re.compile(r"/docx?/([A-Za-z0-9]+)")
+
+
+@dataclass(slots=True)
+class ProbeRecord:
+    """Result of probing one Lark API surface for source-access validation."""
+
+    surface: str
+    target_id: str
+    target_name: str
+    command: str
+    status: str
+    sample_count: int
+    top_level_keys: list[str]
+    artifact_relpath: str | None = None
+    identity: str | None = None
+    notes: str | None = None
+    error_message: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def extract_doc_token(doc: str) -> str:
+    """Extract a bare document token from a Lark document URL or raw token.
+
+    If *doc* looks like a URL, the token is parsed from the path component.
+    If it is already a bare token, it is returned as-is.
+
+    Raises :exc:`ValueError` if a URL is given but no token can be extracted.
+    """
+    raw = doc.strip()
+    if "://" not in raw:
+        return raw
+    match = _DOC_TOKEN_PATTERN.search(raw)
+    if match is None:
+        raise ValueError(f"Could not extract document token from {doc!r}")
+    return match.group(1)
+
+
+def summarize_probe(surface: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Summarise a raw Lark API response into a compact probe status dict."""
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    top_level_keys = sorted(data.keys()) if isinstance(data, dict) else []
+    identity = payload.get("identity") if isinstance(payload, dict) else None
+
+    if not _is_success_payload(payload):
+        return {
+            "status": "blocked",
+            "sample_count": 0,
+            "top_level_keys": top_level_keys,
+            "identity": identity,
+            "notes": payload.get("msg") or payload.get("message") or payload.get("error"),
+        }
+
+    if surface in _CHAT_SURFACES:
+        items = data.get("messages", []) if isinstance(data, dict) else []
+    elif surface in {"doc_comments", "doc_comment_replies"}:
+        items = data.get("items", []) if isinstance(data, dict) else []
+    elif surface == "doc_fetch":
+        items = [data] if isinstance(data, dict) and data.get("doc_id") else []
+    else:
+        items = []
+
+    return {
+        "status": "ok" if items else "empty",
+        "sample_count": len(items),
+        "top_level_keys": top_level_keys,
+        "identity": identity,
+        "notes": None,
+    }
+
+
+def build_report_manifest(probes: list[ProbeRecord]) -> dict[str, Any]:
+    """Build a source-access report manifest dict from a list of *probes*."""
+    counts_by_status: dict[str, int] = {}
+    counts_by_surface: dict[str, int] = {}
+    for probe in probes:
+        counts_by_status[probe.status] = counts_by_status.get(probe.status, 0) + 1
+        counts_by_surface[probe.surface] = counts_by_surface.get(probe.surface, 0) + 1
+
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "probe_count": len(probes),
+        "counts_by_status": counts_by_status,
+        "counts_by_surface": counts_by_surface,
+        "probes": [probe.to_dict() for probe in probes],
+    }
+
+
+def _is_success_payload(payload: dict[str, Any]) -> bool:
+    if "ok" in payload:
+        return bool(payload["ok"])
+    if "code" in payload:
+        return payload.get("code") == 0
+    return True

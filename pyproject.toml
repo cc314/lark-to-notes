@@ -55,7 +55,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S", "E501", "TCH"]
-"automation/**" = ["ANN", "N", "UP", "B", "SIM", "RUF", "E501"]
 "src/lark_to_notes/storage/db.py" = ["TCH003"]
 "src/lark_to_notes/intake/ledger.py" = ["TCH003"]
 "src/lark_to_notes/intake/replay.py" = ["TCH003"]
@@ -69,11 +68,6 @@ ignore = [
 python_version = "3.12"
 strict = true
 files = ["src", "tests"]
-exclude = ["automation/"]
-
-[[tool.mypy.overrides]]
-module = "automation.*"
-ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
