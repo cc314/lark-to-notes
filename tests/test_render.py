@@ -315,15 +315,22 @@ class TestRenderRawNote:
         text = Path(result.target_path).read_text()
         assert "[[2024-01-15]]" in text
 
-    def test_failed_on_io_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import lark_to_notes.render.raw as raw_mod
+    def test_failed_on_io_error(self, tmp_path: Path) -> None:
+        import os
 
-        def _boom(*_a: object, **_kw: object) -> str:
-            raise OSError("disk full")
-
-        monkeypatch.setattr(raw_mod, "_body_block", _boom)
-        item = _item()
-        result = render_raw_note(item, tmp_path)
+        # Pre-create raw/ so mkdir(exist_ok=True) inside render_raw_note succeeds,
+        # but make it read-only so the actual file write fails with PermissionError.
+        raw_dir = tmp_path / "raw"
+        raw_dir.mkdir()
+        os.chmod(raw_dir, 0o555)
+        if os.access(raw_dir, os.W_OK):
+            os.chmod(raw_dir, 0o755)
+            pytest.skip("cannot make dir read-only in this environment")
+        try:
+            item = _item()
+            result = render_raw_note(item, tmp_path)
+        finally:
+            os.chmod(raw_dir, 0o755)
         assert result.outcome == RenderOutcome.FAILED
         assert result.error is not None
 
@@ -675,31 +682,34 @@ class TestNoteWriterPipeline:
         assert "[[" in text
 
     def test_source_note_path_not_propagated_when_raw_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path
     ) -> None:
-        import lark_to_notes.render.raw as raw_mod
-        from lark_to_notes.render.models import RenderResult
+        import os
 
-        def _fail_render(item: RenderItem, vault_root: Path) -> RenderResult:
-            return RenderResult(
-                surface=RenderSurface.RAW,
-                outcome=RenderOutcome.FAILED,
-                target_path="/some/path.md",
-                block_id="ltn-raw-xxx",
-                entity_id=item.task_id,
-                error="forced failure",
-            )
+        # Make raw/ read-only so render_raw_note fails with PermissionError,
+        # which is caught internally and returns outcome=FAILED.
+        raw_dir = tmp_path / "raw"
+        raw_dir.mkdir()
+        os.chmod(raw_dir, 0o555)
+        if os.access(raw_dir, os.W_OK):
+            os.chmod(raw_dir, 0o755)
+            pytest.skip("cannot make dir read-only in this environment")
+        try:
+            writer = NoteWriter(vault_root=tmp_path)
+            item = _item(promotion_rec="daily_only", event_date="2024-01-15")
+            results = writer.render_pipeline(item)
+        finally:
+            os.chmod(raw_dir, 0o755)
 
-        monkeypatch.setattr(raw_mod, "render_raw_note", _fail_render)
-        writer = NoteWriter(vault_root=tmp_path)
-        item = _item(promotion_rec="daily_only", event_date="2024-01-15")
-        writer.render_pipeline(item)
+        # Raw stage must have failed.
+        assert results[0].outcome == RenderOutcome.FAILED
+        # Daily note should still be rendered (pipeline continues after raw failure).
         daily_path = tmp_path / "daily" / "2024-01-15.md"
         if daily_path.exists():
             text = daily_path.read_text()
-            # source_note_path should NOT have been set to the failed path
-            # so the daily note will not contain a wikilink derived from the failed raw path
-            assert "/some/path" not in text
+            # source_note_path was NOT propagated from the failed raw result,
+            # so the daily note must not contain a wikilink pointing into raw/.
+            assert str(raw_dir) not in text
 
     def test_pipeline_returns_results_in_order(self, tmp_path: Path) -> None:
         writer = NoteWriter(vault_root=tmp_path)
