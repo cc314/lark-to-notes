@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import time
+import tomllib
 from dataclasses import asdict
 from datetime import date, timedelta
 from pathlib import Path
@@ -164,8 +166,8 @@ def _build_parser() -> argparse.ArgumentParser:
     render_parser.add_argument(
         "--vault-root",
         type=Path,
-        default=Path("."),
-        help="Root of the Obsidian vault (default: current directory)",
+        default=_default_vault_root(),
+        help="Root of the Obsidian vault (default: config file or current directory)",
     )
     render_parser.add_argument(
         "--status",
@@ -1275,8 +1277,49 @@ def _print_live_worker_error(
     return 1
 
 
+def _load_project_config() -> dict[str, Any]:
+    """Load config from standard locations (first match wins).
+
+    Search order:
+    1. ``$LARK_TO_NOTES_CONFIG`` env var (explicit path)
+    2. ``~/.config/lark-to-notes/config.toml``
+    3. ``./lark-to-notes.toml`` (current working directory)
+    """
+    candidates: list[Path | None] = [
+        Path(os.environ["LARK_TO_NOTES_CONFIG"]) if "LARK_TO_NOTES_CONFIG" in os.environ else None,
+        Path.home() / ".config" / "lark-to-notes" / "config.toml",
+        Path("lark-to-notes.toml"),
+    ]
+    for path in candidates:
+        if path is not None and path.exists():
+            with path.open("rb") as f:
+                return tomllib.load(f)
+    return {}
+
+
+_PROJECT_CONFIG: dict[str, Any] | None = None
+
+
+def _project_config() -> dict[str, Any]:
+    global _PROJECT_CONFIG
+    if _PROJECT_CONFIG is None:
+        _PROJECT_CONFIG = _load_project_config()
+    return _PROJECT_CONFIG
+
+
 def _default_db_path() -> Path:
+    cfg = _project_config()
+    if "db_path" in cfg:
+        return Path(str(cfg["db_path"])).expanduser()
     return Path("var") / "lark-to-notes.db"
+
+
+def _default_vault_root() -> Path:
+    cfg = _project_config()
+    if "vault_root" in cfg:
+        return Path(str(cfg["vault_root"])).expanduser()
+    return Path(".")
+
 
 
 def _default_worker_config_path() -> Path:
