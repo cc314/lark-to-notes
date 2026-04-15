@@ -10,7 +10,9 @@ import pytest
 from lark_to_notes.storage.db import connect, init_db
 from lark_to_notes.testing import FixtureCorpusError, load_fixture_corpus
 
-FIXTURE_CORPUS_ROOT = Path(__file__).resolve().parents[1] / "raw" / "lark-worker" / "fixture-corpus"
+FIXTURE_CORPUS_ROOT = (
+    Path(__file__).resolve().parent / "fixtures" / "lark-worker" / "fixture-corpus"
+)
 
 
 def test_load_fixture_corpus_from_directory() -> None:

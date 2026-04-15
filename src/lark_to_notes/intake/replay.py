@@ -1,14 +1,15 @@
 """Replay semantics: ingest historical JSONL files into the SQLite ledger.
 
 Replay is the mechanism that makes the intake pipeline safe to re-run.
-Any JSONL file in ``raw/lark-worker/`` can be replayed into SQLite without
-creating duplicates, because :func:`~lark_to_notes.intake.ledger.insert_raw_message`
-uses ``INSERT OR IGNORE`` on the stable ``message_id`` primary key.
+Any JSONL file in the vault's ``raw/lark-worker/`` directory can be replayed
+into SQLite without creating duplicates, because
+:func:`~lark_to_notes.intake.ledger.insert_raw_message` uses
+``INSERT OR IGNORE`` on the stable ``message_id`` primary key.
 
 Typical usage::
 
     from lark_to_notes.intake.replay import replay_jsonl_dir
-    stats = replay_jsonl_dir(conn, raw_dir=Path("raw/lark-worker"))
+    stats = replay_jsonl_dir(conn, raw_dir=vault_root / "raw" / "lark-worker")
 
 """
 

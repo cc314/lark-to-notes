@@ -273,7 +273,7 @@ def test_full_pipeline_100_messages_e2e(
     raw_dir.mkdir()
     vault_root = tmp_path / "vault"
     vault_root.mkdir()
-    fixture_corpus = Path(__file__).resolve().parents[1] / "raw" / "lark-worker" / "fixture-corpus"
+    fixture_corpus = Path(__file__).resolve().parent / "fixtures" / "lark-worker" / "fixture-corpus"
 
     conn = connect(db_path)
     init_db(conn)

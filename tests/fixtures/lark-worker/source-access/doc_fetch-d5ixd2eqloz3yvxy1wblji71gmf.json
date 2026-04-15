@@ -1,0 +1,21 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "doc_id": "D5IXd2EQLoZ3yvxY1WBlJi71gmf",
+    "length": 238,
+    "log_id": "20260414145236B3CAB3BB7DF3A1A9C75F",
+    "markdown": "# Problem definition\n\n## Origin\n\nWe aim to provide a holistic view of the risk behaviour of GTF lending customers, utilizing internal data across different product lines (gpl/ttpl/gpp), external data (cbi/mpv11/fdc) and gojek/gopay data.\n",
+    "message": "Document fetched successfully",
+    "offset": 0,
+    "title": "Universal Bscore v1.0.0",
+    "total_length": 238
+  },
+  "_notice": {
+    "update": {
+      "current": "1.0.7",
+      "latest": "1.0.10",
+      "message": "lark-cli 1.0.10 available, current 1.0.7"
+    }
+  }
+}

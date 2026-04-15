@@ -1,0 +1,29 @@
+{
+  "source_id": "dm-zhao-yuanlong",
+  "source_type": "dm_user",
+  "message_id": "om_x100b55a770069cace121eb0bf2fe31b",
+  "chat_id": "ou_cfbb3a081027568887b6063c4f56d50a",
+  "chat_type": "unknown",
+  "sender_id": "ou_cfbb3a081027568887b6063c4f56d50a",
+  "sender_name": "Zhao Yuanlong",
+  "direction": "incoming",
+  "created_at": "2026-03-05 15:42",
+  "content": "[Invalid text JSON]",
+  "payload": {
+    "content": "[Invalid text JSON]",
+    "create_time": "2026-03-05 15:42",
+    "deleted": true,
+    "message_id": "om_x100b55a770069cace121eb0bf2fe31b",
+    "msg_type": "text",
+    "sender": {
+      "id": "ou_cfbb3a081027568887b6063c4f56d50a",
+      "id_type": "open_id",
+      "name": "Zhao Yuanlong",
+      "sender_type": "user",
+      "tenant_key": "1503d1037d07977c"
+    },
+    "updated": false
+  },
+  "_fixture_source_path": "/Users/chenchao/Documents/notes/raw/lark-worker/2026-03-05.jsonl",
+  "_fixture_line_number": 16
+}

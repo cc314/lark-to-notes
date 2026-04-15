@@ -19,7 +19,9 @@ from lark_to_notes.feedback import (
 from lark_to_notes.storage.db import connect, init_db, upsert_watched_source
 from lark_to_notes.tasks.registry import get_task, upsert_task
 
-FIXTURE_CORPUS_ROOT = Path(__file__).resolve().parents[1] / "raw" / "lark-worker" / "fixture-corpus"
+FIXTURE_CORPUS_ROOT = (
+    Path(__file__).resolve().parent / "fixtures" / "lark-worker" / "fixture-corpus"
+)
 
 
 def test_sources_list_json_outputs_watched_sources(

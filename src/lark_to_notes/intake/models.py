@@ -43,7 +43,7 @@ class RawMessage:
 
     This is the canonical record type for the intake ledger.  Instances
     are serialised into both the SQLite ``raw_messages`` table and the
-    append-only daily JSONL files under ``raw/lark-worker/``.
+    append-only daily JSONL files under ``<vault_root>/raw/lark-worker/``.
 
     Attributes:
         message_id: Stable Lark message identifier.

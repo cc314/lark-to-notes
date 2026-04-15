@@ -1,0 +1,140 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "has_more": false,
+    "messages": [
+      {
+        "content": "hi @Alexander Indrajaya L team,\nis there a way to inject custom secrets into the airflow dag? e.g. a Lark webhook url? since such info can't be committed into the repo.\n\nE.g. can we update the ci/cd build script in mlops-cicd  to inject these as environment variables via gitlab ci/cd variables? Or any other better way of doing this?\n\ncc @Dong Yajie",
+        "create_time": "2026-04-13 16:50",
+        "deleted": false,
+        "mentions": [
+          {
+            "id": "ou_6b2fbafc89e3a384dfca9216a9cef74c",
+            "key": "@_user_1",
+            "name": "Alexander Indrajaya L"
+          },
+          {
+            "id": "ou_4e9948ced7effc0c946da597666afaf1",
+            "key": "@_user_2",
+            "name": "Dong Yajie"
+          }
+        ],
+        "message_id": "om_x100b52fea88338b0e153da4e038e79e",
+        "msg_type": "post",
+        "sender": {
+          "id": "ou_9f0571a8a0739aa9750ff9e842791650",
+          "id_type": "open_id",
+          "name": "Jeremy Goh Swee Kang (Wu Ruikang)",
+          "sender_type": "user",
+          "tenant_key": "1503d1037d07977c"
+        },
+        "thread_id": "omt_1ab926adcd4e19b9",
+        "thread_replies": [
+          {
+            "content": "currently we only have encrypted tfvars to store the secret \nCMIIW @Chen Zhike @Rezha Julio Arly Pradana \n\ncan we update the ci/cd build script in mlops-cicd  to inject these as environment variables via gitlab ci/cd variables? Or any other better way of doing this?\nor maybe we can have Ali KMS and mount it as a kubesecret and inject into airflow dag\n\nor can add it via variables/connections in Airflow UI (only by people w/ permissions)\n\nIMHO, I assume that secret is rarely updated, hence, you can ask MLOps team whenever you want add more secrets/variables",
+            "create_time": "2026-04-13 18:10",
+            "deleted": false,
+            "mentions": [
+              {
+                "id": "ou_a93541fc279a5db6665ef10fe8f028fa",
+                "key": "@_user_1",
+                "name": "Chen Zhike"
+              },
+              {
+                "id": "ou_fc23e435ec45206118224d93a75e3995",
+                "key": "@_user_2",
+                "name": "Rezha Julio Arly Pradana"
+              }
+            ],
+            "message_id": "om_x100b52f85eafc4a0e2cf8f527a7f2fc",
+            "msg_type": "post",
+            "sender": {
+              "id": "ou_6b2fbafc89e3a384dfca9216a9cef74c",
+              "id_type": "open_id",
+              "name": "Alexander Indrajaya L",
+              "sender_type": "user",
+              "tenant_key": "1503d1037d07977c"
+            },
+            "thread_id": "omt_1ab926adcd4e19b9",
+            "updated": true
+          },
+          {
+            "content": "or maybe we can have Ali KMS and mount it as a kubesecret and inject into airflow dag\nI assume if we do this, this secret will be injected into all airflow pipelines?\nCuz certain secrets are project specific, I was wondering if there's a way to scope it down.\n\nIt also makes it a lot harder to manage/deprecate these secrets long term, since it'll be hard to keep track of which pipelines are actively using what secret if the secrets are managed on an instance level rather than at dag level\n\nyou can ask MLOps team whenever you want add more secrets/variables\nsure, this works with us. Primarily the issue above ^",
+            "create_time": "2026-04-13 18:14",
+            "deleted": false,
+            "message_id": "om_x100b52f851c6c4a8e2ce93fd3a7ff23",
+            "msg_type": "post",
+            "sender": {
+              "id": "ou_9f0571a8a0739aa9750ff9e842791650",
+              "id_type": "open_id",
+              "name": "Jeremy Goh Swee Kang (Wu Ruikang)",
+              "sender_type": "user",
+              "tenant_key": "1503d1037d07977c"
+            },
+            "thread_id": "omt_1ab926adcd4e19b9",
+            "updated": false
+          },
+          {
+            "content": "I assume if we do this, this secret will be injected into all airflow pipelines?\nUnless we can have some config in the job_config.yaml, to locate a specific Ali KMS Secret to mount into the DAG, need to exercise on the feasibility tho\n\nIs this mandatory and urgent?",
+            "create_time": "2026-04-13 18:20",
+            "deleted": false,
+            "message_id": "om_x100b52f87b533530e2db0752b312ef6",
+            "msg_type": "post",
+            "sender": {
+              "id": "ou_6b2fbafc89e3a384dfca9216a9cef74c",
+              "id_type": "open_id",
+              "name": "Alexander Indrajaya L",
+              "sender_type": "user",
+              "tenant_key": "1503d1037d07977c"
+            },
+            "thread_id": "omt_1ab926adcd4e19b9",
+            "updated": false
+          },
+          {
+            "content": "At least for now, the impetus is finding a way to send messages to Lark webhook url from within Airflow itself.\n--\nps: actually as I was reviewing the mlops-cicd repo, I remembered that we also have the DOTENV file functionality which can be used to inject secrets into the environment, let me explore that solution first~",
+            "create_time": "2026-04-13 18:29",
+            "deleted": false,
+            "message_id": "om_x100b52f817e510ace2f145b122646b8",
+            "msg_type": "text",
+            "sender": {
+              "id": "ou_9f0571a8a0739aa9750ff9e842791650",
+              "id_type": "open_id",
+              "name": "Jeremy Goh Swee Kang (Wu Ruikang)",
+              "sender_type": "user",
+              "tenant_key": "1503d1037d07977c"
+            },
+            "thread_id": "omt_1ab926adcd4e19b9",
+            "updated": false
+          },
+          {
+            "content": "Yeah, I think you can use MGR_PROD_DOT_ENV_FILE (or any other DS project and env) in ci/cd variable and it wili be mounted as .env ",
+            "create_time": "2026-04-13 19:24",
+            "deleted": false,
+            "message_id": "om_x100b52f96bbf00a0e2b337ba35cf5bb",
+            "msg_type": "text",
+            "sender": {
+              "id": "ou_fc23e435ec45206118224d93a75e3995",
+              "id_type": "open_id",
+              "name": "Rezha Julio Arly Pradana",
+              "sender_type": "user",
+              "tenant_key": "1503d1037d07977c"
+            },
+            "thread_id": "omt_1ab926adcd4e19b9",
+            "updated": false
+          }
+        ],
+        "updated": true
+      }
+    ],
+    "page_token": "",
+    "total": 1
+  },
+  "_notice": {
+    "update": {
+      "current": "1.0.7",
+      "latest": "1.0.10",
+      "message": "lark-cli 1.0.10 available, current 1.0.7"
+    }
+  }
+}

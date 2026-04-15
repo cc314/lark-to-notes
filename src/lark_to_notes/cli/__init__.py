@@ -94,7 +94,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Replay raw JSONL logs into the SQLite store",
     )
     replay_parser.add_argument("--db", type=Path, default=_default_db_path())
-    replay_parser.add_argument("--raw-dir", type=Path, default=Path("raw") / "lark-worker")
+    replay_parser.add_argument(
+        "--raw-dir",
+        type=Path,
+        default=_default_vault_root() / "raw" / "lark-worker",
+        help="Directory containing raw JSONL logs (default: <vault_root>/raw/lark-worker)",
+    )
     replay_parser.add_argument("--glob", default="*.jsonl")
     replay_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     replay_parser.set_defaults(handler=_handle_replay)
@@ -106,7 +111,8 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument(
         "--fixture-corpus",
         type=Path,
-        default=Path("raw") / "lark-worker" / "fixture-corpus",
+        default=_default_vault_root() / "raw" / "lark-worker" / "fixture-corpus",
+        help="Fixture corpus root (default: <vault_root>/raw/lark-worker/fixture-corpus)",
     )
     doctor_parser.add_argument("--db", type=Path, default=_default_db_path())
     doctor_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
@@ -1319,7 +1325,6 @@ def _default_vault_root() -> Path:
     if "vault_root" in cfg:
         return Path(str(cfg["vault_root"])).expanduser()
     return Path(".")
-
 
 
 def _default_worker_config_path() -> Path:

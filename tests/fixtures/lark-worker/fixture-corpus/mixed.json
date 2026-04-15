@@ -1,0 +1,29 @@
+{
+  "source_id": "dm-zhuang-zhen",
+  "source_type": "dm_user",
+  "message_id": "om_x100b597e86233cace2d41e02c021e2c",
+  "chat_id": "ou_4dfe15a5bcafc6e258f66f1438175f63",
+  "chat_type": "unknown",
+  "sender_id": "ou_4dfe15a5bcafc6e258f66f1438175f63",
+  "sender_name": "Zhuang Zhen",
+  "direction": "incoming",
+  "created_at": "2026-01-12 16:10",
+  "content": "[Image: img_v3_02ts_92e3e581-6c1b-4807-b7bf-b31795ddb9hu]\n这么总结 没问题吧",
+  "payload": {
+    "content": "[Image: img_v3_02ts_92e3e581-6c1b-4807-b7bf-b31795ddb9hu]\n这么总结 没问题吧",
+    "create_time": "2026-01-12 16:10",
+    "deleted": false,
+    "message_id": "om_x100b597e86233cace2d41e02c021e2c",
+    "msg_type": "post",
+    "sender": {
+      "id": "ou_4dfe15a5bcafc6e258f66f1438175f63",
+      "id_type": "open_id",
+      "name": "Zhuang Zhen",
+      "sender_type": "user",
+      "tenant_key": "1503d1037d07977c"
+    },
+    "updated": true
+  },
+  "_fixture_source_path": "/Users/chenchao/Documents/notes/raw/lark-worker/2026-01-12.jsonl",
+  "_fixture_line_number": 1
+}

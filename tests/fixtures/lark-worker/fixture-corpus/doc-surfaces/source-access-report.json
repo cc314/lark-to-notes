@@ -1,0 +1,162 @@
+{
+  "generated_at": "2026-04-14T06:52:42.343930+00:00",
+  "probe_count": 8,
+  "counts_by_status": {
+    "ok": 6,
+    "empty": 1,
+    "not_sampled": 1
+  },
+  "counts_by_surface": {
+    "dm_chat_messages": 1,
+    "group_chat_messages": 1,
+    "doc_fetch": 2,
+    "doc_comments": 2,
+    "doc_comment_replies": 2
+  },
+  "probes": [
+    {
+      "surface": "dm_chat_messages",
+      "target_id": "dm-zhuang-zhen",
+      "target_name": "Zhuang Zhen",
+      "command": "lark-cli im +chat-messages-list --as user --sort asc --page-size 1 --format json --start 2026-04-12 --end 2026-04-15 --user-id ou_4dfe15a5bcafc6e258f66f1438175f63",
+      "status": "ok",
+      "sample_count": 1,
+      "top_level_keys": [
+        "has_more",
+        "messages",
+        "page_token",
+        "total"
+      ],
+      "artifact_relpath": "dm_chat_messages-dm-zhuang-zhen.json",
+      "identity": "user",
+      "notes": null,
+      "error_message": null
+    },
+    {
+      "surface": "group_chat_messages",
+      "target_id": "chat-lending-ds-mle-sync",
+      "target_name": "Lending DS x MLE Sync up",
+      "command": "lark-cli im +chat-messages-list --as user --sort asc --page-size 1 --format json --start 2026-04-12 --end 2026-04-15 --chat-id oc_735175e118e300453fb5b23567f65a62",
+      "status": "ok",
+      "sample_count": 1,
+      "top_level_keys": [
+        "has_more",
+        "messages",
+        "page_token",
+        "total"
+      ],
+      "artifact_relpath": "group_chat_messages-chat-lending-ds-mle-sync.json",
+      "identity": "user",
+      "notes": null,
+      "error_message": null
+    },
+    {
+      "surface": "doc_fetch",
+      "target_id": "D5IXd2EQLoZ3yvxY1WBlJi71gmf",
+      "target_name": "https://gotocompany.sg.larksuite.com/docx/D5IXd2EQLoZ3yvxY1WBlJi71gmf",
+      "command": "lark-cli docs +fetch --as user --doc \"https://gotocompany.sg.larksuite.com/docx/D5IXd2EQLoZ3yvxY1WBlJi71gmf\" --format json",
+      "status": "ok",
+      "sample_count": 1,
+      "top_level_keys": [
+        "doc_id",
+        "length",
+        "log_id",
+        "markdown",
+        "message",
+        "offset",
+        "title",
+        "total_length"
+      ],
+      "artifact_relpath": "doc_fetch-d5ixd2eqloz3yvxy1wblji71gmf.json",
+      "identity": "user",
+      "notes": null,
+      "error_message": null
+    },
+    {
+      "surface": "doc_comments",
+      "target_id": "D5IXd2EQLoZ3yvxY1WBlJi71gmf",
+      "target_name": "https://gotocompany.sg.larksuite.com/docx/D5IXd2EQLoZ3yvxY1WBlJi71gmf",
+      "command": "lark-cli drive file.comments list --as user --format json --params {\"file_token\": \"D5IXd2EQLoZ3yvxY1WBlJi71gmf\", \"file_type\": \"docx\", \"page_size\": 1}",
+      "status": "empty",
+      "sample_count": 0,
+      "top_level_keys": [
+        "has_more",
+        "items",
+        "page_token"
+      ],
+      "artifact_relpath": "doc_comments-d5ixd2eqloz3yvxy1wblji71gmf.json",
+      "identity": null,
+      "notes": null,
+      "error_message": null
+    },
+    {
+      "surface": "doc_comment_replies",
+      "target_id": "D5IXd2EQLoZ3yvxY1WBlJi71gmf",
+      "target_name": "https://gotocompany.sg.larksuite.com/docx/D5IXd2EQLoZ3yvxY1WBlJi71gmf",
+      "command": "lark-cli drive file.comment.replys list",
+      "status": "not_sampled",
+      "sample_count": 0,
+      "top_level_keys": [],
+      "artifact_relpath": null,
+      "identity": null,
+      "notes": "No comment_id available from the seeded comment probe",
+      "error_message": null
+    },
+    {
+      "surface": "doc_fetch",
+      "target_id": "KBpUdWUeNoHgllx3h7YllsWagSh",
+      "target_name": "https://gotocompany.sg.larksuite.com/docx/KBpUdWUeNoHgllx3h7YllsWagSh",
+      "command": "lark-cli docs +fetch --as user --doc \"https://gotocompany.sg.larksuite.com/docx/KBpUdWUeNoHgllx3h7YllsWagSh\" --format json",
+      "status": "ok",
+      "sample_count": 1,
+      "top_level_keys": [
+        "doc_id",
+        "length",
+        "log_id",
+        "markdown",
+        "message",
+        "offset",
+        "title",
+        "total_length"
+      ],
+      "artifact_relpath": "doc_fetch-kbpudwuenohgllx3h7yllswagsh.json",
+      "identity": "user",
+      "notes": null,
+      "error_message": null
+    },
+    {
+      "surface": "doc_comments",
+      "target_id": "KBpUdWUeNoHgllx3h7YllsWagSh",
+      "target_name": "https://gotocompany.sg.larksuite.com/docx/KBpUdWUeNoHgllx3h7YllsWagSh",
+      "command": "lark-cli drive file.comments list --as user --format json --params {\"file_token\": \"KBpUdWUeNoHgllx3h7YllsWagSh\", \"file_type\": \"docx\", \"page_size\": 1}",
+      "status": "ok",
+      "sample_count": 1,
+      "top_level_keys": [
+        "has_more",
+        "items",
+        "page_token"
+      ],
+      "artifact_relpath": "doc_comments-kbpudwuenohgllx3h7yllswagsh.json",
+      "identity": null,
+      "notes": null,
+      "error_message": null
+    },
+    {
+      "surface": "doc_comment_replies",
+      "target_id": "7566550716832075484",
+      "target_name": "https://gotocompany.sg.larksuite.com/docx/KBpUdWUeNoHgllx3h7YllsWagSh",
+      "command": "lark-cli drive file.comment.replys list --as user --format json --params {\"file_token\": \"KBpUdWUeNoHgllx3h7YllsWagSh\", \"comment_id\": \"7566550716832075484\", \"file_type\": \"docx\", \"page_size\": 1}",
+      "status": "ok",
+      "sample_count": 1,
+      "top_level_keys": [
+        "has_more",
+        "items",
+        "page_token"
+      ],
+      "artifact_relpath": "doc_comment_replies-7566550716832075484.json",
+      "identity": null,
+      "notes": null,
+      "error_message": null
+    }
+  ]
+}

@@ -20,7 +20,9 @@ from lark_to_notes.storage.db import connect, init_db, upsert_watched_source
 from lark_to_notes.tasks import derive_fingerprint
 from lark_to_notes.tasks.registry import get_task_by_fingerprint
 
-FIXTURE_CORPUS_ROOT = Path(__file__).resolve().parents[1] / "raw" / "lark-worker" / "fixture-corpus"
+FIXTURE_CORPUS_ROOT = (
+    Path(__file__).resolve().parent / "fixtures" / "lark-worker" / "fixture-corpus"
+)
 REVIEW_CONTENT = "context context context " * 40
 REVIEW_CREATED_AT = "2026-05-01T10:03:00Z"
 

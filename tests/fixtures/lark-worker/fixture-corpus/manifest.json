@@ -1,0 +1,37 @@
+{
+  "generated_at": "2026-04-14T08:51:18.959068+00:00",
+  "raw_summary": {
+    "record_count": 442,
+    "updated": 103,
+    "deleted": 3,
+    "threaded": 8,
+    "han": 364,
+    "mixed": 263,
+    "english_only": 75,
+    "msg_types": {
+      "file": 4,
+      "image": 14,
+      "post": 46,
+      "text": 376
+    }
+  },
+  "scenario_files": {
+    "han": "han.json",
+    "mixed": "mixed.json",
+    "updated": "updated.json",
+    "english_only": "english_only.json",
+    "threaded": "threaded.json",
+    "deleted": "deleted.json"
+  },
+  "missing_scenarios": [],
+  "doc_surface_artifacts": [
+    "doc-surfaces/source-access-report.json",
+    "doc-surfaces/dm_chat_messages-dm-zhuang-zhen.json",
+    "doc-surfaces/group_chat_messages-chat-lending-ds-mle-sync.json",
+    "doc-surfaces/doc_fetch-d5ixd2eqloz3yvxy1wblji71gmf.json",
+    "doc-surfaces/doc_comments-d5ixd2eqloz3yvxy1wblji71gmf.json",
+    "doc-surfaces/doc_fetch-kbpudwuenohgllx3h7yllswagsh.json",
+    "doc-surfaces/doc_comments-kbpudwuenohgllx3h7yllswagsh.json",
+    "doc-surfaces/doc_comment_replies-7566550716832075484.json"
+  ]
+}
