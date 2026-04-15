@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
+import time
 from dataclasses import asdict
+from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -103,6 +106,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("raw") / "lark-worker" / "fixture-corpus",
     )
+    doctor_parser.add_argument("--db", type=Path, default=_default_db_path())
     doctor_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     doctor_parser.set_defaults(handler=_handle_doctor)
 
@@ -187,6 +191,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     reconcile_parser.add_argument("--db", type=Path, default=_default_db_path())
     reconcile_parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional lark_worker JSON config for live source reconciliation",
+    )
+    reconcile_parser.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON",
@@ -220,16 +230,90 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     budget_status_parser.set_defaults(handler=_handle_budget_status)
 
-    # ---------------------------------------------------------------------------
-    # Lark-connectivity stubs (require automation/lark_worker at runtime)
-    # ---------------------------------------------------------------------------
-    for cmd, help_text in [
-        ("sync-once", "Poll all enabled sources once and ingest new messages"),
-        ("sync-daemon", "Run continuous polling loop for all enabled sources"),
-        ("backfill", "Re-ingest historical messages for a watched source"),
-    ]:
-        stub_parser = subparsers.add_parser(cmd, help=help_text)
-        stub_parser.set_defaults(handler=_handle_lark_stub, lark_command=cmd)
+    sync_once_parser = subparsers.add_parser(
+        "sync-once",
+        help="Poll all enabled sources once and ingest new messages",
+    )
+    sync_once_parser.add_argument(
+        "--config",
+        type=Path,
+        default=_default_worker_config_path(),
+        help="Path to the live lark_worker JSON config",
+    )
+    sync_once_parser.add_argument("--db", type=Path, default=_default_db_path())
+    sync_once_parser.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="Skip note sync after polling",
+    )
+    sync_once_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    sync_once_parser.set_defaults(handler=_handle_sync_once)
+
+    sync_daemon_parser = subparsers.add_parser(
+        "sync-daemon",
+        help="Run continuous polling loop for all enabled sources",
+    )
+    sync_daemon_parser.add_argument(
+        "--config",
+        type=Path,
+        default=_default_worker_config_path(),
+        help="Path to the live lark_worker JSON config",
+    )
+    sync_daemon_parser.add_argument("--db", type=Path, default=_default_db_path())
+    sync_daemon_parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=None,
+        help="Override the polling interval in seconds",
+    )
+    sync_daemon_parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="Stop after N polling cycles (useful for testing and supervised runs)",
+    )
+    sync_daemon_parser.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="Skip note sync after each polling cycle",
+    )
+    sync_daemon_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+    sync_daemon_parser.set_defaults(handler=_handle_sync_daemon)
+
+    backfill_parser = subparsers.add_parser(
+        "backfill",
+        help="Re-ingest historical messages for watched sources",
+    )
+    backfill_parser.add_argument(
+        "--config",
+        type=Path,
+        default=_default_worker_config_path(),
+        help="Path to the live lark_worker JSON config",
+    )
+    backfill_parser.add_argument("--db", type=Path, default=_default_db_path())
+    backfill_parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Override the historical lookback window in days",
+    )
+    backfill_parser.add_argument(
+        "--source-id",
+        action="append",
+        default=[],
+        help="Limit backfill to one or more configured source_id values",
+    )
+    backfill_parser.add_argument(
+        "--sync-notes",
+        action="store_true",
+        help="Also sync notes after backfill",
+    )
+    backfill_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    backfill_parser.set_defaults(handler=_handle_backfill)
 
     return parser
 
@@ -289,14 +373,22 @@ def _handle_replay(args: argparse.Namespace) -> int:
 
 
 def _handle_doctor(args: argparse.Namespace) -> int:
+    from lark_to_notes.runtime.registry import health_report
+
     corpus = load_fixture_corpus(args.fixture_corpus)
-    conn = connect(":memory:")
-    init_db(conn)
-    replay_summary = corpus.replay_summary(conn)
+    replay_conn = connect(":memory:")
+    init_db(replay_conn)
+    replay_summary = corpus.replay_summary(replay_conn)
+    runtime_db_path: Path = args.db
+    runtime_db_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_conn = connect(runtime_db_path)
+    init_db(runtime_conn)
+    runtime_health = health_report(runtime_conn)
     payload = {
         "status": "ok" if replay_summary.total_records == corpus.record_count else "error",
         "schema_version": SCHEMA_VERSION,
         "migrations": all_versions(),
+        "db_path": str(runtime_db_path),
         "fixture_corpus": {
             "root": str(corpus.root),
             "record_count": corpus.record_count,
@@ -311,12 +403,14 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "db_record_count": replay_summary.db_record_count,
             "matches_manifest": replay_summary.total_records == corpus.record_count,
         },
+        "runtime": asdict(runtime_health),
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"status: {payload['status']}")
         print(f"schema_version: {SCHEMA_VERSION}")
+        print(f"runtime_db: {payload['db_path']}")
         print(
             f"fixture_corpus: {corpus.record_count} records across "
             f"{len(corpus.scenario_names)} scenarios"
@@ -324,21 +418,51 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         print(
             f"replay: {replay_summary.file_count} file(s), {replay_summary.total_records} record(s)"
         )
+        print(
+            "runtime: "
+            f"{runtime_health.run_count_total} run(s), "
+            f"{runtime_health.dead_letter_count} dead letter(s), "
+            f"error_rate={runtime_health.error_rate:.3f}"
+        )
     return 0
 
 
 def _handle_feedback_import(args: argparse.Namespace) -> int:
+    import yaml
+
     db_path: Path = args.db
     artifact_path: Path = args.artifact
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(db_path)
     init_db(conn)
-    artifact = load_feedback_artifact(artifact_path)
-    result = apply_feedback_artifact(
-        conn,
-        artifact,
-        artifact_path=str(artifact_path),
-    )
+    try:
+        artifact = load_feedback_artifact(artifact_path)
+    except (yaml.YAMLError, ValueError) as exc:
+        error_payload = {
+            "error": str(exc),
+            "artifact_path": str(artifact_path),
+        }
+        if args.json:
+            print(json.dumps(error_payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"error: {exc}")
+        return 1
+    try:
+        result = apply_feedback_artifact(
+            conn,
+            artifact,
+            artifact_path=str(artifact_path),
+        )
+    except LookupError as exc:
+        error_payload = {
+            "error": str(exc),
+            "artifact_path": str(artifact_path),
+        }
+        if args.json:
+            print(json.dumps(error_payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"error: {exc}")
+        return 1
     conn.commit()
     payload = {
         "db_path": str(db_path),
@@ -410,7 +534,10 @@ def _handle_sources_validate(args: argparse.Namespace) -> int:
 
 
 def _handle_reclassify(args: argparse.Namespace) -> int:
-    from lark_to_notes.distill import DistillInput, default_classifier
+    from uuid import uuid4
+
+    from lark_to_notes.budget import BudgetEnforcer, BudgetPolicy
+    from lark_to_notes.distill import DistillInput, classify_with_routing, default_classifier
     from lark_to_notes.intake.ledger import list_raw_messages
     from lark_to_notes.tasks import derive_fingerprint, upsert_task
     from lark_to_notes.tasks.registry import get_task_by_fingerprint
@@ -423,6 +550,8 @@ def _handle_reclassify(args: argparse.Namespace) -> int:
 
     messages = list_raw_messages(conn, source_id=args.source_id, limit=args.limit)
     classifier = default_classifier
+    budget_enforcer = BudgetEnforcer(conn, BudgetPolicy())
+    budget_run_id = f"reclassify:{uuid4()}"
 
     inserted = 0
     skipped = 0
@@ -436,7 +565,13 @@ def _handle_reclassify(args: argparse.Namespace) -> int:
             direction=msg.direction,
             created_at=msg.created_at,
         )
-        result = classifier.classify(dinput)
+        result = classify_with_routing(
+            dinput,
+            classifier=classifier,
+            llm_provider=None,
+            budget_enforcer=budget_enforcer,
+            run_id=budget_run_id,
+        )
         fp = derive_fingerprint(msg.content, msg.source_id, msg.created_at)
         if dry_run:
             # Check fingerprint without writing.
@@ -470,6 +605,7 @@ def _handle_reclassify(args: argparse.Namespace) -> int:
         "messages_processed": len(messages),
         "tasks_inserted": inserted,
         "tasks_skipped": skipped,
+        "budget_run_id": budget_run_id,
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -540,56 +676,93 @@ def _handle_render(args: argparse.Namespace) -> int:
 
 
 def _handle_reconcile(args: argparse.Namespace) -> int:
-    from lark_to_notes.runtime.reconcile import SourceState, reconcile_cursors
+    from lark_to_notes.runtime.executor import execute_reconcile_run
+    from lark_to_notes.runtime.reconcile import reconcile_cursors
 
     db_path: Path = args.db
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(db_path)
     init_db(conn)
+    config_path: Path | None = args.config
 
-    # Build SourceState from stored checkpoints — the "current" state is
-    # whatever we last recorded.  This surfaces cursor gaps without requiring
-    # a live Lark connection.
-    rows = conn.execute(
-        "SELECT source_id, last_message_id, last_message_timestamp FROM checkpoints"
-    ).fetchall()
-    source_states: dict[str, SourceState] = {}
-    for row in rows:
-        source_states[row[0]] = SourceState(
-            source_id=row[0],
-            latest_message_id=row[1] or "",
-            latest_message_timestamp=row[2] or "",
+    mode = "stored"
+    verification_report = None
+    repair_triggered = False
+    worker_config_path: str | None = None
+    live_result = None
+    if config_path is not None:
+        try:
+            config, service = _load_worker_service(config_path)
+        except Exception as exc:
+            return _print_live_worker_error(
+                command="reconcile",
+                db_path=db_path,
+                config_path=config_path,
+                exc=exc,
+                json_output=args.json,
+            )
+        worker_config_path = str(config_path)
+        mode = "live"
+        _mirror_worker_state(conn, config)
+        source_states = _collect_live_source_states(service, conn)
+
+        def repair(_source_id: str, _stored_cursor: str | None) -> None:
+            nonlocal repair_triggered
+            if repair_triggered:
+                return
+            _worker_poll_once(service, sync_notes=True)
+            repair_triggered = True
+
+        live_result = execute_reconcile_run(
+            conn,
+            source_states,
+            repair_fn=repair,
+            command="reconcile",
         )
-
-    report = reconcile_cursors(conn, source_states)
-    conn.commit()
+        if repair_triggered:
+            _mirror_worker_state(conn, config)
+            verification_states = _collect_live_source_states(service, conn)
+            verification_report = reconcile_cursors(conn, verification_states)
+        else:
+            verification_report = live_result.report
+    else:
+        source_states = _stored_source_states(conn)
+        live_result = execute_reconcile_run(conn, source_states, command="reconcile")
+        verification_report = live_result.report
 
     payload = {
         "db_path": str(db_path),
-        "sources_checked": report.source_ids_checked,
-        "gaps_found": report.gaps_found,
-        "repairs_attempted": report.repairs_attempted,
-        "repairs_succeeded": report.repairs_succeeded,
-        "gap_details": list(report.gap_details),
+        "mode": mode,
+        "worker_config": worker_config_path,
+        "runtime_run_id": live_result.run.run_id,
+        "sources_checked": verification_report.source_ids_checked,
+        "gaps_found": verification_report.gaps_found,
+        "repairs_attempted": live_result.report.repairs_attempted,
+        "repairs_succeeded": live_result.report.repairs_succeeded,
+        "repair_sync_triggered": repair_triggered,
+        "gap_details": list(verification_report.gap_details),
+        "initial_gap_details": list(live_result.report.gap_details),
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"db_path: {payload['db_path']}")
+        print(f"mode: {mode}")
         print(
-            f"checked {report.source_ids_checked} source(s); "
-            f"{report.gaps_found} gap(s) detected; "
-            f"{report.repairs_succeeded}/{report.repairs_attempted} repair(s) succeeded"
+            f"checked {verification_report.source_ids_checked} source(s); "
+            f"{verification_report.gaps_found} gap(s) remain; "
+            f"{live_result.report.repairs_succeeded}/"
+            f"{live_result.report.repairs_attempted} repair(s) succeeded"
         )
-        for detail in report.gap_details:
+        for detail in verification_report.gap_details:
             print(f"  ! {detail}")
-    return 1 if report.gaps_found > report.repairs_succeeded else 0
+    return 1 if verification_report.gaps_found else 0
 
 
 def _handle_budget_status(args: argparse.Namespace) -> int:
     import datetime
 
-    from lark_to_notes.budget.store import get_day_budget_snapshot, get_run_budget_snapshot
+    from lark_to_notes.budget import BudgetEnforcer, BudgetPolicy
 
     db_path: Path = args.db
     run_id: str | None = args.run_id
@@ -597,21 +770,25 @@ def _handle_budget_status(args: argparse.Namespace) -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(db_path)
     init_db(conn)
+    enforcer = BudgetEnforcer(conn, BudgetPolicy())
 
     if run_id:
-        snap = get_run_budget_snapshot(conn, run_id)
+        snap = enforcer.get_run_snapshot(run_id)
         scope = f"run_id={run_id}"
     elif day:
-        snap = get_day_budget_snapshot(conn, day)
+        snap = enforcer.get_day_snapshot(day)
         scope = f"day={day}"
     else:
         today = datetime.date.today().isoformat()
-        snap = get_day_budget_snapshot(conn, today)
+        snap = enforcer.get_day_snapshot(today)
         scope = f"day={today} (default)"
+    quality_metrics = enforcer.get_quality_metrics()
 
     payload: dict[str, Any] = {
         "db_path": str(db_path),
         "scope": scope,
+        "cache_hit_rate": snap.cache_hit_rate,
+        "quality_metrics": asdict(quality_metrics),
     }
     if snap.call_count == 0:
         payload["status"] = "no_records"
@@ -639,27 +816,255 @@ def _handle_budget_status(args: argparse.Namespace) -> int:
             print(f"scope: {scope}")
             print(f"net_llm_calls: {snap.net_llm_call_count}  (total: {snap.call_count})")
             print(
-                f"cached: {snap.cached_count}  "
-                f"fallbacks: {snap.fallback_count}"
+                f"cached: {snap.cached_count}  fallbacks: {snap.fallback_count}  "
+                f"cache_hit_rate: {snap.cache_hit_rate:.2%}"
             )
             print(
-                f"tokens: {snap.prompt_tokens_sum} prompt / "
-                f"{snap.completion_tokens_sum} completion"
+                f"tokens: {snap.prompt_tokens_sum} prompt / {snap.completion_tokens_sum} completion"
             )
             p95 = snap.p95_latency_ms
             print(f"p95_latency_ms: {p95 if p95 is not None else 'n/a'}")
+        print(
+            "quality: "
+            f"confirm={quality_metrics.confirm_count} "
+            f"dismiss={quality_metrics.dismiss_count} "
+            f"duplicate={quality_metrics.duplicate_count} "
+            f"review={quality_metrics.review_rate:.2%}"
+        )
     return 0
 
 
-def _handle_lark_stub(args: argparse.Namespace) -> int:
-    cmd: str = args.lark_command
-    msg = (
-        f"'{cmd}' requires a live Lark connection which is provided by "
-        "automation/lark_worker/. Run the worker process separately and use "
-        "'replay' to ingest its JSONL output into the local store."
+def _handle_sync_once(args: argparse.Namespace) -> int:
+    db_path: Path = args.db
+    config_path: Path = args.config
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_conn = connect(db_path)
+    init_db(runtime_conn)
+    try:
+        config, service = _load_worker_service(config_path)
+    except Exception as exc:
+        return _print_live_worker_error(
+            command="sync-once",
+            db_path=db_path,
+            config_path=config_path,
+            exc=exc,
+            json_output=args.json,
+        )
+
+    from lark_to_notes.runtime.lock import RuntimeLock
+    from lark_to_notes.runtime.registry import finish_run, health_report, start_run
+
+    run = start_run(runtime_conn, "sync-once")
+    result: dict[str, int]
+    try:
+        with RuntimeLock(_runtime_lock_path(config), owner_tag=f"sync-once:{run.run_id}"):
+            service.initialize()
+            result = _worker_poll_once(service, sync_notes=not args.no_sync)
+        _mirror_worker_state(runtime_conn, config)
+        completed = (
+            finish_run(
+                runtime_conn,
+                run.run_id,
+                items_processed=result.get("inserted_messages", 0),
+            )
+            or run
+        )
+    except Exception as exc:
+        finish_run(runtime_conn, run.run_id, items_failed=1, error=str(exc))
+        return _print_live_worker_error(
+            command="sync-once",
+            db_path=db_path,
+            config_path=config_path,
+            exc=exc,
+            json_output=args.json,
+            run_id=run.run_id,
+        )
+
+    payload = {
+        "db_path": str(db_path),
+        "config_path": str(config_path),
+        "runtime_run_id": completed.run_id,
+        "worker_state_db": str(config.state_db),
+        "inserted_messages": result.get("inserted_messages", 0),
+        "distilled_items": result.get("distilled_items", 0),
+        "sync_notes": not args.no_sync,
+        "runtime": asdict(health_report(runtime_conn)),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"db_path: {payload['db_path']}")
+        print(f"config_path: {payload['config_path']}")
+        print(f"runtime_run_id: {payload['runtime_run_id']}")
+        print(
+            f"inserted_messages: {payload['inserted_messages']}  "
+            f"distilled_items: {payload['distilled_items']}"
+        )
+    return 0
+
+
+def _handle_sync_daemon(args: argparse.Namespace) -> int:
+    db_path: Path = args.db
+    config_path: Path = args.config
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_conn = connect(db_path)
+    init_db(runtime_conn)
+    try:
+        config, service = _load_worker_service(config_path)
+    except Exception as exc:
+        return _print_live_worker_error(
+            command="sync-daemon",
+            db_path=db_path,
+            config_path=config_path,
+            exc=exc,
+            json_output=args.json,
+        )
+
+    from lark_to_notes.runtime.lock import RuntimeLock
+    from lark_to_notes.runtime.registry import finish_run, health_report, start_run
+
+    poll_interval = (
+        args.poll_interval if args.poll_interval is not None else config.poll_interval_seconds
     )
-    print(f"error: {msg}")
-    return 1
+    cycle_count = 0
+    idle_cycles = 0
+    inserted_messages = 0
+    distilled_items = 0
+    run_ids: list[str] = []
+
+    try:
+        while args.max_cycles is None or cycle_count < args.max_cycles:
+            cycle_count += 1
+            run = start_run(runtime_conn, "sync-daemon")
+            run_ids.append(run.run_id)
+            try:
+                with RuntimeLock(_runtime_lock_path(config), owner_tag=f"sync-daemon:{run.run_id}"):
+                    service.initialize()
+                    result = _worker_poll_once(service, sync_notes=not args.no_sync)
+                _mirror_worker_state(runtime_conn, config)
+                finish_run(
+                    runtime_conn,
+                    run.run_id,
+                    items_processed=result.get("inserted_messages", 0),
+                )
+            except Exception as exc:
+                finish_run(runtime_conn, run.run_id, items_failed=1, error=str(exc))
+                return _print_live_worker_error(
+                    command="sync-daemon",
+                    db_path=db_path,
+                    config_path=config_path,
+                    exc=exc,
+                    json_output=args.json,
+                    run_id=run.run_id,
+                )
+
+            inserted_messages += result.get("inserted_messages", 0)
+            distilled_items += result.get("distilled_items", 0)
+            if result.get("inserted_messages", 0) == 0 and result.get("distilled_items", 0) == 0:
+                idle_cycles += 1
+
+            if args.max_cycles is None or cycle_count < args.max_cycles:
+                time.sleep(poll_interval)
+    except KeyboardInterrupt:
+        pass
+
+    payload = {
+        "db_path": str(db_path),
+        "config_path": str(config_path),
+        "worker_state_db": str(config.state_db),
+        "cycle_count": cycle_count,
+        "idle_cycles": idle_cycles,
+        "inserted_messages": inserted_messages,
+        "distilled_items": distilled_items,
+        "run_ids": run_ids,
+        "runtime": asdict(health_report(runtime_conn)),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"db_path: {payload['db_path']}")
+        print(f"config_path: {payload['config_path']}")
+        print(
+            f"cycle_count: {cycle_count}  idle_cycles: {idle_cycles}  "
+            f"inserted_messages: {inserted_messages}  distilled_items: {distilled_items}"
+        )
+    return 0
+
+
+def _handle_backfill(args: argparse.Namespace) -> int:
+    db_path: Path = args.db
+    config_path: Path = args.config
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_conn = connect(db_path)
+    init_db(runtime_conn)
+    try:
+        config, service = _load_worker_service(config_path)
+    except Exception as exc:
+        return _print_live_worker_error(
+            command="backfill",
+            db_path=db_path,
+            config_path=config_path,
+            exc=exc,
+            json_output=args.json,
+        )
+
+    from lark_to_notes.runtime.lock import RuntimeLock
+    from lark_to_notes.runtime.registry import finish_run, health_report, start_run
+
+    run = start_run(runtime_conn, "backfill")
+    source_ids = set(args.source_id) or None
+    try:
+        with RuntimeLock(_runtime_lock_path(config), owner_tag=f"backfill:{run.run_id}"):
+            service.initialize()
+            result = _worker_backfill(
+                service,
+                lookback_days=args.days,
+                source_ids=source_ids,
+                sync_notes=args.sync_notes,
+            )
+        _mirror_worker_state(runtime_conn, config)
+        completed = (
+            finish_run(
+                runtime_conn,
+                run.run_id,
+                items_processed=result.get("inserted_messages", 0),
+            )
+            or run
+        )
+    except Exception as exc:
+        finish_run(runtime_conn, run.run_id, items_failed=1, error=str(exc))
+        return _print_live_worker_error(
+            command="backfill",
+            db_path=db_path,
+            config_path=config_path,
+            exc=exc,
+            json_output=args.json,
+            run_id=run.run_id,
+        )
+
+    payload = {
+        "db_path": str(db_path),
+        "config_path": str(config_path),
+        "runtime_run_id": completed.run_id,
+        "worker_state_db": str(config.state_db),
+        "sources_scanned": result.get("sources_scanned", 0),
+        "inserted_messages": result.get("inserted_messages", 0),
+        "distilled_items": result.get("distilled_items", 0),
+        "sync_notes": args.sync_notes,
+        "runtime": asdict(health_report(runtime_conn)),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"db_path: {payload['db_path']}")
+        print(f"config_path: {payload['config_path']}")
+        print(f"runtime_run_id: {payload['runtime_run_id']}")
+        print(
+            f"sources_scanned: {payload['sources_scanned']}  "
+            f"inserted_messages: {payload['inserted_messages']}  "
+            f"distilled_items: {payload['distilled_items']}"
+        )
+    return 0
 
 
 def _watched_source_to_dict(source: WatchedSource) -> dict[str, Any]:
@@ -676,5 +1081,207 @@ def _replay_file_to_dict(file_summary: FixtureReplayFile) -> dict[str, Any]:
     }
 
 
+def _stored_source_states(conn: Any) -> dict[str, Any]:
+    from lark_to_notes.runtime.reconcile import SourceState
+
+    rows = conn.execute(
+        "SELECT source_id, last_message_id, last_message_timestamp FROM checkpoints"
+    ).fetchall()
+    return {
+        row[0]: SourceState(
+            source_id=row[0],
+            latest_message_id=row[1] or "",
+            latest_message_timestamp=row[2] or "",
+        )
+        for row in rows
+    }
+
+
+def _load_worker_service(config_path: Path) -> tuple[Any, Any]:
+    config_module = importlib.import_module("automation.lark_worker.config")
+    service_module = importlib.import_module("automation.lark_worker.service")
+    resolved = config_path.expanduser().resolve()
+    config = cast("Any", config_module.load_config(resolved))
+    worker_service = cast("Any", service_module.WorkerService)
+    return config, worker_service(config)
+
+
+def _worker_poll_once(service: Any, *, sync_notes: bool) -> dict[str, int]:
+    return cast("dict[str, int]", service.poll_once(sync_notes=sync_notes))
+
+
+def _worker_backfill(
+    service: Any,
+    *,
+    lookback_days: int | None,
+    source_ids: set[str] | None,
+    sync_notes: bool,
+) -> dict[str, int]:
+    return cast(
+        "dict[str, int]",
+        service.backfill_history(
+            lookback_days=lookback_days,
+            source_ids=source_ids,
+            sync_notes=sync_notes,
+        ),
+    )
+
+
+def _mirror_worker_state(runtime_conn: Any, worker_config: Any) -> None:
+    from lark_to_notes.config.sources import Checkpoint, WatchedSource
+    from lark_to_notes.storage.db import upsert_checkpoint, upsert_watched_source
+
+    worker_db_module = importlib.import_module("automation.lark_worker.db")
+    worker_connect = cast("Any", worker_db_module.connect)
+    with worker_connect(worker_config.state_db) as worker_conn:
+        source_rows = worker_conn.execute(
+            "SELECT source_id, source_type, external_id, name, enabled FROM watched_sources"
+        ).fetchall()
+        checkpoint_rows = worker_conn.execute(
+            """
+            SELECT source_id, last_message_id, last_message_timestamp, page_token, updated_at
+            FROM checkpoints
+            """
+        ).fetchall()
+
+    for row in source_rows:
+        upsert_watched_source(
+            runtime_conn,
+            WatchedSource(
+                source_id=row["source_id"],
+                source_type=_map_worker_source_type(row["source_type"]),
+                external_id=row["external_id"],
+                name=row["name"],
+                enabled=bool(row["enabled"]),
+                config={"worker_source_type": row["source_type"]},
+            ),
+        )
+    for row in checkpoint_rows:
+        upsert_checkpoint(
+            runtime_conn,
+            Checkpoint(
+                source_id=row["source_id"],
+                last_message_id=row["last_message_id"],
+                last_message_timestamp=row["last_message_timestamp"],
+                page_token=row["page_token"],
+                updated_at=row["updated_at"],
+            ),
+        )
+
+
+def _collect_live_source_states(service: Any, runtime_conn: Any) -> dict[str, Any]:
+    from lark_to_notes.runtime.reconcile import SourceState
+    from lark_to_notes.storage.db import get_checkpoint
+
+    end_date = (date.today() + timedelta(days=1)).isoformat()
+    source_states: dict[str, Any] = {}
+    for source in service.config.enabled_sources:
+        checkpoint = get_checkpoint(runtime_conn, source.source_id)
+        if source.source_type not in {"dm_user", "chat"}:
+            if checkpoint is None:
+                continue
+            source_states[source.source_id] = SourceState(
+                source_id=source.source_id,
+                latest_message_id=checkpoint.last_message_id or "",
+                latest_message_timestamp=checkpoint.last_message_timestamp or "",
+            )
+            continue
+
+        response = service.client.list_chat_messages(
+            source=source,
+            start_date=_live_start_date(
+                checkpoint.last_message_timestamp if checkpoint is not None else None,
+                lookback_days=service.config.poll_lookback_days,
+            ),
+            end_date=end_date,
+            page_size=1,
+            sort="desc",
+        )
+        messages = response.get("data", {}).get("messages", [])
+        if messages:
+            latest = messages[0]
+            source_states[source.source_id] = SourceState(
+                source_id=source.source_id,
+                latest_message_id=latest.get("message_id", ""),
+                latest_message_timestamp=latest.get("create_time", ""),
+            )
+            continue
+        if checkpoint is None:
+            continue
+        source_states[source.source_id] = SourceState(
+            source_id=source.source_id,
+            latest_message_id=checkpoint.last_message_id or "",
+            latest_message_timestamp=checkpoint.last_message_timestamp or "",
+        )
+    return source_states
+
+
+def _live_start_date(timestamp: str | None, *, lookback_days: int) -> str:
+    if timestamp:
+        return timestamp.split("T", 1)[0].split(" ", 1)[0]
+    return (date.today() - timedelta(days=lookback_days)).isoformat()
+
+
+def _map_worker_source_type(source_type: str) -> Any:
+    from lark_to_notes.config.sources import SourceType
+
+    mapping = {
+        "dm_user": SourceType.DM,
+        "dm": SourceType.DM,
+        "chat": SourceType.GROUP,
+        "group": SourceType.GROUP,
+        "doc": SourceType.DOC,
+    }
+    if source_type not in mapping:
+        raise ValueError(f"unsupported worker source_type: {source_type!r}")
+    return mapping[source_type]
+
+
+def _runtime_lock_path(worker_config: Any) -> Path:
+    lock_path = cast("Path", worker_config.vault_root) / "var" / "lark-to-notes.runtime.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    return lock_path
+
+
+def _print_live_worker_error(
+    *,
+    command: str,
+    db_path: Path,
+    config_path: Path,
+    exc: Exception,
+    json_output: bool,
+    run_id: str | None = None,
+) -> int:
+    error_text = str(exc).strip() or exc.__class__.__name__
+    guidance = (
+        "If this is an auth or scope-expiry issue, re-authenticate with "
+        "`lark-cli auth login --as user` and confirm the watched sources are "
+        "visible to the configured Lark app."
+    )
+    payload = {
+        "status": "error",
+        "command": command,
+        "db_path": str(db_path),
+        "config_path": str(config_path),
+        "runtime_run_id": run_id,
+        "error": error_text,
+        "guidance": guidance,
+    }
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"error: {error_text}")
+        print(guidance)
+    return 1
+
+
 def _default_db_path() -> Path:
     return Path("var") / "lark-to-notes.db"
+
+
+def _default_worker_config_path() -> Path:
+    worker_dir = Path(__file__).resolve().parents[3] / "automation" / "lark_worker"
+    config_path = worker_dir / "config.json"
+    if config_path.exists():
+        return config_path
+    return worker_dir / "example-config.json"
