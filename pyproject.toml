@@ -75,6 +75,9 @@ exclude = ["automation/"]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
 pythonpath = ["."]
+markers = [
+    "slow: marks tests as slow-running smoke tests (deselect with '-m not slow')",
+]
 
 [dependency-groups]
 dev = [
