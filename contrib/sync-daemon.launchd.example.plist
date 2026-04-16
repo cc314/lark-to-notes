@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Example LaunchAgent for macOS: wraps the canonical `lark-to-notes sync-daemon`
+  CLI (in-repo ChatLiveAdapter + lark-cli). Copy to ~/Library/LaunchAgents/,
+  replace CHANGE_ME_* placeholders, then `launchctl load` the plist.
+
+  This file is not loaded automatically; it is reference-only.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>local.lark-to-notes.sync-daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>CHANGE_ME_UV</string>
+      <string>run</string>
+      <string>lark-to-notes</string>
+      <string>sync-daemon</string>
+      <string>--config</string>
+      <string>CHANGE_ME_LIVE_JSON</string>
+      <string>--db</string>
+      <string>CHANGE_ME_RUNTIME_DB</string>
+      <string>--poll-interval</string>
+      <string>300</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>CHANGE_ME_REPO_ROOT</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>CHANGE_ME_LOG_DIR/sync-daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>CHANGE_ME_LOG_DIR/sync-daemon.err.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+  </dict>
+</plist>

@@ -301,6 +301,14 @@ Relevant runtime defaults:
 | raw replay dir | `<vault_root>/raw/lark-worker` |
 | fixture corpus for `doctor` | `<vault_root>/raw/lark-worker/fixture-corpus` |
 
+### Background execution (supervised / launchd)
+
+Live mode is intentionally **just the canonical CLI** plus your supervisor. There is no second in-process “worker daemon” inside this repository.
+
+- **Polling loop:** run `uv run lark-to-notes sync-daemon …` under `launchd`, `systemd`, or any other supervisor. Use absolute paths for `--config`, `--db`, and the `uv` binary. For macOS, see `contrib/sync-daemon.launchd.example.plist` (copy, edit `CHANGE_ME_*`, install under `~/Library/LaunchAgents/`, then `launchctl load`).
+- **Event stream:** run `lark-cli event +subscribe …` and pipe its stdout into `uv run lark-to-notes sync-events …` (see `contrib/sync-events-pipeline.example.sh`). A LaunchAgent should execute that shell wrapper, not try to embed a shell pipeline in the plist.
+- **Reconcile / repair:** `reconcile --config …` already probes live cursors via `ChatLiveAdapter.collect_live_source_states` and triggers `_worker_poll_once` (in-repo poll) as repair — there is no separate worker-state mirror on the canonical path.
+
 ### Feedback artifact format
 
 Structured review feedback is a YAML sidecar:
