@@ -397,6 +397,45 @@ def mark_chat_intake_processed(
     conn.commit()
 
 
+def chat_intake_ledger_counts(
+    conn: sqlite3.Connection,
+    *,
+    now_iso: str | None = None,
+) -> dict[str, int]:
+    """Return aggregate counts for mixed poll/event chat-intake rows.
+
+    *pending_ready* rows are eligible for drain (coalescing window elapsed).
+    *pending_coalescing* rows are still waiting inside ``coalesce_until``.
+    """
+
+    now = now_iso or _utcnow_iso()
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE
+                WHEN processing_state = ? AND (coalesce_until IS NULL OR coalesce_until <= ?)
+                THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE
+                WHEN processing_state = ? AND coalesce_until IS NOT NULL AND coalesce_until > ?
+                THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN processing_state = ? THEN 1 ELSE 0 END), 0)
+        FROM chat_intake_ledger
+        """,
+        (
+            ChatIntakeState.PENDING.value,
+            now,
+            ChatIntakeState.PENDING.value,
+            now,
+            ChatIntakeState.PROCESSED.value,
+        ),
+    ).fetchone()
+    return {
+        "pending_ready": int(row[0]) if row else 0,
+        "pending_coalescing": int(row[1]) if row else 0,
+        "processed": int(row[2]) if row else 0,
+    }
+
+
 def observe_document_surface(
     conn: sqlite3.Connection,
     *,

@@ -24,6 +24,8 @@ import contextlib
 import io
 import json
 import logging
+import os
+import subprocess
 import sys
 from collections.abc import Generator
 from pathlib import Path
@@ -467,3 +469,28 @@ def test_full_pipeline_ledger_before_classify_before_render_ordering(tmp_path: P
         f"classify event (index {min(classify_indices)}) must appear before "
         f"render event (index {min(render_indices)})"
     )
+
+
+def test_verify_live_adapter_script_emits_step_events() -> None:
+    """``scripts/verify_live_adapter.py`` is the offline operator smoke harness."""
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "verify_live_adapter.py"
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(repo_root / "src")},
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    events: list[dict[str, object]] = []
+    for raw in proc.stderr.splitlines():
+        raw = raw.strip()
+        if raw.startswith("{"):
+            with contextlib.suppress(json.JSONDecodeError):
+                events.append(json.loads(raw))
+    steps = {str(e.get("step", "")) for e in events}
+    assert "doctor" in steps
+    assert "sync_events" in steps

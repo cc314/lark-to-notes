@@ -277,6 +277,17 @@ Notes on the live commands:
 - `sync-events` reads NDJSON from stdin; you normally pair it with `lark-cli event +subscribe` in a shell pipeline. By default it also **drains** ready rows from `chat_intake_ledger` into `raw_messages` under the same runtime lock as other writers: `{parent-of---db}/lark-to-notes.runtime.lock` (for example `var/lark-to-notes.runtime.lock` next to `var/lark-to-notes.db`). Pass `--no-drain` to only append ledger observations.
 - `sync-once`, `sync-daemon`, and `backfill` require a working `lark-cli` install and credentials with access to the configured sources; `sync-events` only needs stdin (often fed by `lark-cli` in another process)
 
+#### Live adapter validation matrix
+
+| Concern | Where it is covered |
+| --- | --- |
+| Single-writer / runtime lock (poll, drain, cross-process) | `tests/test_live_sync_controls.py`, `tests/test_runtime.py` (`TestLiveSyncOperationalControls`, `TestRuntimeLock`) |
+| Mixed poll + event intake ledger | `tests/test_intake.py`, `tests/test_live_chat_events.py`, `tests/test_live_chat_ingest.py` |
+| Live CLI wiring (`sync-once`, `sync-events`, `doctor` JSON) | `tests/test_cli.py`, `tests/test_e2e_workflow.py` |
+| Budget / heuristics routing | `tests/test_budget.py`, `tests/test_distill.py` |
+| Offline operator smoke (structured stderr steps) | `uv run python scripts/verify_live_adapter.py` (also exercised by `tests/test_integration_logging.py`) |
+| Full pipeline demo (no Lark credentials) | `uv run python scripts/integration_run.py` |
+
 ### Background live operation (`sync-daemon`, reconcile, launchd)
 
 - **Ownership:** `sync-daemon` is a thin loop around the same in-repo stack as `sync-once` (`ChatLiveAdapter`, canonical `--db`, runtime lock under `{vault_root}/var/lark-to-notes.runtime.lock`). There is no separate Python “worker” process contract inside this repo—supervisors should invoke the published CLI.

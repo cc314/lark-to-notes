@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from lark_to_notes.intake.ledger import (
     chat_ingest_key,
+    chat_intake_ledger_counts,
     count_raw_messages,
     document_ingest_key,
     finish_intake_run,
@@ -42,6 +43,7 @@ __all__ = [
     "IntakePath",
     "RawMessage",
     "chat_ingest_key",
+    "chat_intake_ledger_counts",
     "count_raw_messages",
     "document_ingest_key",
     "finish_intake_run",

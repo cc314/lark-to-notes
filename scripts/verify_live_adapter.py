@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Offline smoke checks for the in-repo live adapter surface (no Lark API).
+
+Emits one JSON object per step on **stderr** so supervisors can scrape logs.
+Human-readable banners go to **stdout**. Uses the same ``lark-to-notes``
+entrypoints as operators (``doctor``, ``sync-events``) against a disposable DB.
+
+Exit codes: 0 success, 1 failure.
+
+Usage::
+
+    uv run python scripts/verify_live_adapter.py
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _REPO_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from lark_to_notes.cli import run  # noqa: E402
+
+_FIXTURE_CORPUS = _REPO_ROOT / "tests" / "fixtures" / "lark-worker" / "fixture-corpus"
+
+
+def _log_event(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, default=str), file=sys.stderr, flush=True)
+
+
+def main() -> int:
+    tmp = Path(tempfile.mkdtemp(prefix="lark-verify-live-"))
+    db_path = tmp / "verify.db"
+
+    print(f"Using temp DB: {db_path}", flush=True)
+
+    _log_event({"step": "doctor", "status": "start", "db": str(db_path)})
+    old_out = sys.stdout
+    try:
+        sys.stdout = io.StringIO()
+        rc = run(
+            [
+                "doctor",
+                "--db",
+                str(db_path),
+                "--fixture-corpus",
+                str(_FIXTURE_CORPUS),
+                "--json",
+            ]
+        )
+    finally:
+        sys.stdout = old_out
+    if rc != 0:
+        _log_event({"step": "doctor", "status": "failed", "exit_code": rc})
+        return 1
+    _log_event({"step": "doctor", "status": "ok"})
+
+    envelope = {
+        "header": {"event_type": "im.message.receive_v1"},
+        "event": {
+            "message": {
+                "message_id": "om_verify_script",
+                "chat_id": "ou_chat",
+                "create_time": "1713096000000",
+                "body": {"content": json.dumps({"text": "verify_live_adapter probe"})},
+                "sender": {"id": "ou_sender", "name": "Script"},
+            }
+        },
+    }
+    _log_event({"step": "sync_events", "status": "start"})
+    old_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO(json.dumps(envelope) + "\n")
+        sys.stdout = io.StringIO()
+        rc = run(
+            [
+                "sync-events",
+                "--db",
+                str(db_path),
+                "--source-id",
+                "dm:ou_verify",
+                "--coalesce-window-seconds",
+                "0",
+                "--json",
+            ]
+        )
+    finally:
+        sys.stdin = old_stdin
+        sys.stdout = old_out
+
+    if rc != 0:
+        _log_event({"step": "sync_events", "status": "failed", "exit_code": rc})
+        return 1
+    _log_event({"step": "sync_events", "status": "ok"})
+    print("All live-adapter offline checks passed.", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -248,8 +248,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Optional worker-style live JSON (same file as sync-once) "
-            "for lark-cli-backed reconcile"
+            "Optional worker-style live JSON (same file as sync-once) for lark-cli-backed reconcile"
         ),
     )
     reconcile_parser.add_argument(
@@ -472,6 +471,7 @@ def _handle_replay(args: argparse.Namespace) -> int:
 
 
 def _handle_doctor(args: argparse.Namespace) -> int:
+    from lark_to_notes.intake.ledger import chat_intake_ledger_counts
     from lark_to_notes.runtime.models import RunStatus
     from lark_to_notes.runtime.registry import health_report, list_dead_letters, list_runs
     from lark_to_notes.runtime.supervised import supervised_live_hints
@@ -508,6 +508,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         for item in list_dead_letters(runtime_conn, limit=5)
     ]
     supervised_live = supervised_live_hints(db_path=runtime_db_path)
+    chat_intake = chat_intake_ledger_counts(runtime_conn)
     payload = {
         "status": "ok" if replay_summary.total_records == corpus.record_count else "error",
         "schema_version": SCHEMA_VERSION,
@@ -532,6 +533,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "recent_failed_runs": failed_runs,
             "recent_dead_letters": dead_letters,
         },
+        "chat_intake_ledger": chat_intake,
         "supervised_live": supervised_live,
     }
     if args.json:
@@ -559,9 +561,16 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             f"{len(dead_letters)} recent dead letter(s), "
             f"duplicates={runtime_health.duplicate_event_count}"
         )
+        pend = chat_intake["pending_ready"] + chat_intake["pending_coalescing"]
         print(
-            f"supervised_live: {supervised_live['model']} "
-            "(see `doctor --json` key supervised_live)"
+            "chat_intake: "
+            f"{pend} pending "
+            f"({chat_intake['pending_ready']} ready, "
+            f"{chat_intake['pending_coalescing']} coalescing), "
+            f"{chat_intake['processed']} processed"
+        )
+        print(
+            f"supervised_live: {supervised_live['model']} (see `doctor --json` key supervised_live)"
         )
     return 0
 
@@ -1347,6 +1356,8 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
 
     from lark_to_notes.live.chat_events import ingest_chat_event_ndjson_lines
     from lark_to_notes.runtime.executor import drain_ready_chat_intake
+    from lark_to_notes.runtime.registry import health_report
+    from lark_to_notes.runtime.retry import RetryPolicy
 
     db_path: Path = args.db
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1364,6 +1375,7 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
         coalesce_window_seconds=coalesce_window_seconds,
     )
     drain_processed = 0
+    batch = None
     if not args.no_drain:
         lock_path = db_path.parent / "lark-to-notes.runtime.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1371,6 +1383,7 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
             conn,
             lock_path=lock_path,
             command="sync-events",
+            retry_policy=RetryPolicy(),
         )
         drain_processed = batch.items_processed
     payload = {
@@ -1380,6 +1393,17 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
         "envelopes_ingested": ingested,
         "chat_intake_drained": drain_processed,
         "drain_skipped": bool(args.no_drain),
+        "runtime": asdict(health_report(conn)),
+        "drain_batch": None
+        if batch is None
+        else {
+            "run_id": batch.run.run_id,
+            "items_total": batch.items_total,
+            "items_processed": batch.items_processed,
+            "items_failed": batch.items_failed,
+            "retry_count": batch.retry_count,
+            "dead_letter_ids": list(batch.dead_letter_ids),
+        },
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))

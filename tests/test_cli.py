@@ -800,7 +800,9 @@ def test_sync_once_json_runs_worker_service(
     assert payload["sync_notes"] is True
     assert payload["runtime"]["run_count_total"] == 1
     assert payload["canonical_db_path"] == str((tmp_path / "state.db").resolve())
-    assert payload["runtime_lock_path"] == str((tmp_path / "var" / "lark-to-notes.runtime.lock").resolve())
+    assert payload["runtime_lock_path"] == str(
+        (tmp_path / "var" / "lark-to-notes.runtime.lock").resolve()
+    )
     assert payload["config_state_db"] == str((tmp_path / "worker.db").resolve())
 
 
@@ -869,6 +871,9 @@ def test_sync_events_stdin_ingests_receive_v1(
     assert payload["envelopes_ingested"] == 1
     assert payload["chat_intake_drained"] == 0
     assert payload["drain_skipped"] is False
+    assert "runtime" in payload
+    assert payload["drain_batch"] is not None
+    assert payload["drain_batch"]["items_total"] == 0
 
 
 def test_sync_events_coalesce_zero_drains_ready_rows(
@@ -908,6 +913,9 @@ def test_sync_events_coalesce_zero_drains_ready_rows(
     assert payload["envelopes_ingested"] == 1
     assert payload["chat_intake_drained"] == 1
     assert payload["drain_skipped"] is False
+    assert payload["drain_batch"] is not None
+    assert payload["drain_batch"]["items_processed"] == 1
+    assert payload["drain_batch"]["items_failed"] == 0
     conn = connect(db_path)
     assert count_raw_messages(conn) == 1
 
@@ -1441,6 +1449,7 @@ def test_doctor_json_has_all_expected_keys(
         "replay",
         "runtime",
         "runtime_diagnostics",
+        "chat_intake_ledger",
         "supervised_live",
     ):
         assert key in payload, f"missing key: {key!r}"
@@ -1456,6 +1465,8 @@ def test_doctor_json_has_all_expected_keys(
         assert key in payload["fixture_corpus"], f"missing fixture_corpus key: {key!r}"
     for key in ("recent_failed_runs", "recent_dead_letters"):
         assert key in payload["runtime_diagnostics"], f"missing runtime_diagnostics key: {key!r}"
+    for key in ("pending_ready", "pending_coalescing", "processed"):
+        assert key in payload["chat_intake_ledger"], f"missing chat_intake_ledger key: {key!r}"
 
 
 def test_doctor_human_readable_output(
@@ -1480,4 +1491,5 @@ def test_doctor_human_readable_output(
     assert "status:" in out
     assert "schema_version:" in out
     assert "runtime:" in out
+    assert "chat_intake:" in out
     assert "supervised_live:" in out

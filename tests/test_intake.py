@@ -12,6 +12,7 @@ import pytest
 from lark_to_notes.config.sources import SourceType, WatchedSource
 from lark_to_notes.intake.ledger import (
     chat_ingest_key,
+    chat_intake_ledger_counts,
     count_raw_messages,
     document_ingest_key,
     finish_intake_run,
@@ -265,6 +266,11 @@ def test_event_observation_stays_pending_until_coalesce_window_expires() -> None
     assert [
         ready.ingest_key for ready in list_ready_chat_intake(conn, as_of="2026-04-14T10:01:00Z")
     ] == [item.ingest_key]
+
+    c_before = chat_intake_ledger_counts(conn, now_iso="2026-04-14T10:00:59Z")
+    assert c_before == {"pending_ready": 0, "pending_coalescing": 1, "processed": 0}
+    c_after = chat_intake_ledger_counts(conn, now_iso="2026-04-14T10:01:00Z")
+    assert c_after == {"pending_ready": 1, "pending_coalescing": 0, "processed": 0}
 
 
 def test_event_burst_extends_the_coalescing_window() -> None:

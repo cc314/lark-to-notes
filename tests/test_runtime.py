@@ -15,12 +15,14 @@ Coverage:
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
 from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -718,6 +720,31 @@ class TestRuntimeExecutor:
         assert result.retry_count == 2
         assert dead_letters[0].attempt_count == 3
 
+    def test_execute_work_batch_logs_queue_depth_per_item(
+        self, conn: sqlite3.Connection, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.DEBUG, logger="lark_to_notes.runtime.executor")
+        items = tuple(RuntimeWorkItem(source_id="src-live", item_key=f"key-{i}") for i in range(3))
+
+        def processor(_item: RuntimeWorkItem) -> None:
+            return None
+
+        execute_work_batch(
+            conn,
+            command="live-stress",
+            items=items,
+            processor=processor,
+            lock_path=tmp_path / "batch.lock",
+            sleep_fn=lambda _d: None,
+        )
+        starts = [
+            r
+            for r in caplog.records
+            if r.msg == "runtime_batch_item_start" and r.name == "lark_to_notes.runtime.executor"
+        ]
+        depths = [getattr(r, "queue_depth", None) for r in starts]
+        assert depths == [3, 2, 1]
+
     def test_execute_work_batch_marks_run_failed_on_setup_error(
         self,
         conn: sqlite3.Connection,
@@ -1011,6 +1038,88 @@ class TestRuntimeExecutor:
         assert count_raw_messages(conn) == 1
         assert item is not None
         assert item.processing_state is ChatIntakeState.PROCESSED
+
+    def test_drain_ready_chat_intake_respects_limit_for_backpressure(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """``limit`` bounds each drain pass for large ready queues."""
+
+        as_of = "2026-04-14T12:00:00Z"
+        for i in range(8):
+            observe_chat_message(
+                conn,
+                _chat_msg(f"msg-batch-{i}"),
+                intake_path=IntakePath.POLL,
+                observed_at=as_of,
+            )
+        lock_path = tmp_path / "vault" / "var" / "lark-to-notes.runtime.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        first = drain_ready_chat_intake(
+            conn,
+            lock_path=lock_path,
+            as_of=as_of,
+            limit=3,
+            sleep_fn=lambda _d: None,
+        )
+        second = drain_ready_chat_intake(
+            conn,
+            lock_path=lock_path,
+            as_of=as_of,
+            limit=3,
+            sleep_fn=lambda _d: None,
+        )
+        third = drain_ready_chat_intake(
+            conn,
+            lock_path=lock_path,
+            as_of=as_of,
+            limit=3,
+            sleep_fn=lambda _d: None,
+        )
+        assert first.items_processed == 3
+        assert first.queue_depth_peak == 3
+        assert second.items_processed == 3
+        assert third.items_processed == 2
+        assert count_raw_messages(conn) == 8
+
+    def test_drain_ready_chat_quarantine_logs_structured_fields(
+        self, conn: sqlite3.Connection, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger="lark_to_notes.runtime.executor")
+        observe_chat_message(
+            conn,
+            _chat_msg("msg-quarantine-rt"),
+            intake_path=IntakePath.POLL,
+            observed_at="2026-04-14T12:00:00Z",
+        )
+        with patch(
+            "lark_to_notes.runtime.executor.insert_raw_message",
+            side_effect=RuntimeError("simulated persistence failure"),
+        ):
+            result = drain_ready_chat_intake(
+                conn,
+                lock_path=tmp_path / "q.lock",
+                as_of="2026-04-14T12:00:00Z",
+                retry_policy=RetryPolicy(
+                    max_attempts=1,
+                    base_delay_s=0.0,
+                    max_delay_s=0.0,
+                    jitter_factor=0.0,
+                ),
+                sleep_fn=lambda _d: None,
+            )
+        assert result.items_failed == 1
+        assert result.dead_letter_ids
+        quarantine_logs = [
+            r
+            for r in caplog.records
+            if r.msg == "runtime_batch_item_quarantined"
+            and r.name == "lark_to_notes.runtime.executor"
+        ]
+        assert quarantine_logs
+        rec = quarantine_logs[0]
+        assert getattr(rec, "command", None) == "chat-intake"
+        assert getattr(rec, "dead_letter_id", None)
+        assert getattr(rec, "item_key", None)
 
 
 # ---------------------------------------------------------------------------
