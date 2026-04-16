@@ -368,6 +368,49 @@ def _build_parser() -> argparse.ArgumentParser:
     backfill_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     backfill_parser.set_defaults(handler=_handle_backfill)
 
+    sync_events_parser = subparsers.add_parser(
+        "sync-events",
+        help="Read NDJSON chat event lines from stdin into the mixed chat-intake ledger",
+    )
+    sync_events_parser.add_argument("--db", type=Path, default=_default_db_path())
+    sync_events_parser.add_argument(
+        "--source-id",
+        required=True,
+        help="Watched source_id to attribute events to (must match polling, e.g. dm:ou_xxx)",
+    )
+    sync_events_parser.add_argument(
+        "--worker-source-type",
+        default="dm_user",
+        help="Worker-style source_type string for normalization (default: dm_user)",
+    )
+    sync_events_parser.add_argument(
+        "--chat-type",
+        default="p2p",
+        help="Chat subtype for RawMessage (default: p2p for DM)",
+    )
+    sync_events_parser.add_argument(
+        "--chat-id",
+        default=None,
+        help="Override chat_id when the event payload omits it",
+    )
+    sync_events_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+    sync_events_parser.add_argument(
+        "--coalesce-window-seconds",
+        type=int,
+        default=60,
+        help="Ledger coalescing window for event observations (default: 60)",
+    )
+    sync_events_parser.add_argument(
+        "--no-drain",
+        action="store_true",
+        help="Skip draining ready chat-intake rows into raw_messages (default: drain after stdin)",
+    )
+    sync_events_parser.set_defaults(handler=_handle_sync_events)
+
     return parser
 
 
@@ -1285,6 +1328,59 @@ def _handle_backfill(args: argparse.Namespace) -> int:
             f"sources_scanned: {payload['sources_scanned']}  "
             f"inserted_messages: {payload['inserted_messages']}  "
             f"distilled_items: {payload['distilled_items']}"
+        )
+    return 0
+
+
+def _handle_sync_events(args: argparse.Namespace) -> int:
+    """Ingest ``lark-cli event +subscribe`` NDJSON from stdin (``im.message.receive_v1``)."""
+
+    import sys
+
+    from lark_to_notes.live.chat_events import ingest_chat_event_ndjson_lines
+    from lark_to_notes.runtime.executor import drain_ready_chat_intake
+
+    db_path: Path = args.db
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(db_path)
+    init_db(conn)
+    chat_id_override: str | None = args.chat_id
+    coalesce_window_seconds: int = int(args.coalesce_window_seconds)
+    json_objects, ingested = ingest_chat_event_ndjson_lines(
+        conn,
+        sys.stdin,
+        source_id=str(args.source_id),
+        worker_source_type=str(args.worker_source_type),
+        chat_type=str(args.chat_type),
+        chat_id_override=chat_id_override,
+        coalesce_window_seconds=coalesce_window_seconds,
+    )
+    drain_processed = 0
+    if not args.no_drain:
+        lock_path = db_path.parent / "lark-to-notes.runtime.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        batch = drain_ready_chat_intake(
+            conn,
+            lock_path=lock_path,
+            command="sync-events",
+        )
+        drain_processed = batch.items_processed
+    payload = {
+        "db_path": str(db_path),
+        "source_id": str(args.source_id),
+        "json_objects": json_objects,
+        "envelopes_ingested": ingested,
+        "chat_intake_drained": drain_processed,
+        "drain_skipped": bool(args.no_drain),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"db_path: {payload['db_path']}")
+        print(f"source_id: {payload['source_id']}")
+        print(
+            f"json_objects: {json_objects}  envelopes_ingested: {ingested}  "
+            f"chat_intake_drained: {drain_processed}  drain_skipped: {payload['drain_skipped']}"
         )
     return 0
 

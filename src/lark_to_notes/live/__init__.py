@@ -8,6 +8,13 @@ replay-identical path for raw ``dict`` payloads into ``raw_messages``.
 
 from __future__ import annotations
 
+from lark_to_notes.live.chat_events import (
+    event_type_from_envelope,
+    extract_im_message_from_envelope,
+    ingest_chat_event_ndjson_lines,
+    ingest_receive_message_v1_envelope,
+    iter_chat_event_envelopes_from_ndjson,
+)
 from lark_to_notes.live.chat_ingest import ingest_chat_records
 from lark_to_notes.live.doc_adapters import (
     DocumentAdapterBlockedError,
@@ -38,7 +45,12 @@ __all__ = [
     "LarkCliNotFoundError",
     "LiveWorkerConfigError",
     "LiveWorkerConfigSnapshot",
+    "event_type_from_envelope",
+    "extract_im_message_from_envelope",
+    "ingest_chat_event_ndjson_lines",
     "ingest_chat_records",
+    "ingest_receive_message_v1_envelope",
+    "iter_chat_event_envelopes_from_ndjson",
     "load_live_worker_config",
     "parse_live_worker_config_mapping",
     "poll_document_surfaces_to_ledger",

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,6 +18,7 @@ from lark_to_notes.feedback import (
     FeedbackDirective,
     render_feedback_artifact,
 )
+from lark_to_notes.intake.ledger import count_raw_messages
 from lark_to_notes.storage.db import connect, init_db, upsert_watched_source
 from lark_to_notes.tasks.registry import get_task, upsert_task
 
@@ -836,6 +839,75 @@ def test_sync_once_in_repo_adapter_without_external_worker(
     payload = json.loads(capsys.readouterr().out)
     assert payload["inserted_messages"] == 0
     assert payload["distilled_items"] == 0
+
+
+def test_sync_events_stdin_ingests_receive_v1(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    envelope = {
+        "header": {"event_type": "im.message.receive_v1"},
+        "event": {
+            "message": {
+                "message_id": "om_cli_evt",
+                "chat_id": "ou_chat",
+                "create_time": "1713096000000",
+                "body": {"content": json.dumps({"text": "stdin event"})},
+                "sender": {"id": "ou_sender", "name": "Alice"},
+            }
+        },
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(envelope) + "\n"))
+    db_path = tmp_path / "evt.db"
+    exit_code = run(["sync-events", "--db", str(db_path), "--source-id", "dm:ou_demo", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["json_objects"] == 1
+    assert payload["envelopes_ingested"] == 1
+    assert payload["chat_intake_drained"] == 0
+    assert payload["drain_skipped"] is False
+
+
+def test_sync_events_coalesce_zero_drains_ready_rows(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    envelope = {
+        "header": {"event_type": "im.message.receive_v1"},
+        "event": {
+            "message": {
+                "message_id": "om_cli_evt_drain",
+                "chat_id": "ou_chat",
+                "create_time": "1713096000000",
+                "body": {"content": json.dumps({"text": "stdin event drain"})},
+                "sender": {"id": "ou_sender", "name": "Alice"},
+            }
+        },
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(envelope) + "\n"))
+    db_path = tmp_path / "evt.db"
+    exit_code = run(
+        [
+            "sync-events",
+            "--db",
+            str(db_path),
+            "--source-id",
+            "dm:ou_demo",
+            "--coalesce-window-seconds",
+            "0",
+            "--json",
+        ]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["json_objects"] == 1
+    assert payload["envelopes_ingested"] == 1
+    assert payload["chat_intake_drained"] == 1
+    assert payload["drain_skipped"] is False
+    conn = connect(db_path)
+    assert count_raw_messages(conn) == 1
 
 
 def test_backfill_json_runs_worker_service(
