@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Example LaunchAgent: supervised background live polling.
+
+  Copy to ~/Library/LaunchAgents/ and replace placeholders:
+    __REPO_ROOT__   — checkout containing pyproject.toml
+    __CONFIG_JSON__ — worker-style live JSON (same file as sync-once)
+    __DB_PATH__     — canonical SQLite (e.g. __REPO_ROOT__/var/lark-to-notes.db)
+
+  Load:   launchctl load ~/Library/LaunchAgents/com.lark-to-notes.sync-daemon.plist
+  Unload: launchctl unload ~/Library/LaunchAgents/com.lark-to-notes.sync-daemon.plist
+
+  This is only a template; paths and uv location must match your machine.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.lark-to-notes.sync-daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>-lc</string>
+		<string>cd "__REPO_ROOT__" &amp;&amp; exec uv run lark-to-notes sync-daemon --db "__DB_PATH__" --config "__CONFIG_JSON__"</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>StandardOutPath</key>
+	<string>__REPO_ROOT__/var/lark-to-notes.sync-daemon.log</string>
+	<key>StandardErrorPath</key>
+	<string>__REPO_ROOT__/var/lark-to-notes.sync-daemon.err.log</string>
+	<key>WorkingDirectory</key>
+	<string>__REPO_ROOT__</string>
+</dict>
+</plist>

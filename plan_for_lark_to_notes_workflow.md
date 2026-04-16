@@ -965,6 +965,9 @@ Operational behavior should include:
 6. health metrics for lag, queue depth, error rate, duplicate rate, and backlog age
 7. periodic reconciliation that compares stored cursors against source state and refetches gaps
 8. auth-expiry and credential-recovery guidance
+9. **In-repo live background:** continuous polling is implemented as `lark-to-notes sync-daemon`, which repeatedly executes the same `ChatLiveAdapter` path as `sync-once` under the vault-scoped runtime lock. Launchd, systemd, or another supervisor should wrap that CLI (or a shell one-liner) rather than importing a second long-lived automation stack.
+10. **Reconcile with live config:** `reconcile --config` uses the worker-style JSON only for operator knobs (`vault_root`, poll defaults, `sources[]`). Live cursor comparison uses `lark-cli` via the in-repo adapter; repair is a normal poll/backfill cycle. No merge step copies a legacy worker SQLite database into the canonical `--db`.
+11. **Config `state_db` field:** treated as an optional path carried for compatibility with older external tooling; canonical checkpoints live in the same SQLite file as the rest of the pipeline (`--db`).
 
 ### Live Serialized Note Writer and Locking Contract
 

@@ -277,6 +277,12 @@ Notes on the live commands:
 - `sync-events` reads NDJSON from stdin; you normally pair it with `lark-cli event +subscribe` in a shell pipeline. By default it also **drains** ready rows from `chat_intake_ledger` into `raw_messages` under the same runtime lock as other writers: `{parent-of---db}/lark-to-notes.runtime.lock` (for example `var/lark-to-notes.runtime.lock` next to `var/lark-to-notes.db`). Pass `--no-drain` to only append ledger observations.
 - `sync-once`, `sync-daemon`, and `backfill` require a working `lark-cli` install and credentials with access to the configured sources; `sync-events` only needs stdin (often fed by `lark-cli` in another process)
 
+### Background live operation (`sync-daemon`, reconcile, launchd)
+
+- **Ownership:** `sync-daemon` is a thin loop around the same in-repo stack as `sync-once` (`ChatLiveAdapter`, canonical `--db`, runtime lock under `{vault_root}/var/lark-to-notes.runtime.lock`). There is no separate Python “worker” process contract inside this repo—supervisors should invoke the published CLI.
+- **macOS:** see `scripts/macos/launchd/com.lark-to-notes.sync-daemon.example.plist` for a LaunchAgent template (`ProgramArguments` runs `uv run lark-to-notes sync-daemon …` from a fixed working directory). Edit placeholders before `launchctl load`.
+- **Reconcile:** `reconcile --config …` loads the same worker-style JSON for `vault_root`, `state_db`, and `sources[]`. Live truth for gap detection comes from `ChatLiveAdapter.collect_live_source_states` (lark-cli peek), not from importing `automation.lark_worker`. Repair runs `_worker_poll_once` (same poll path as live sync). Checkpoints and watched sources are written only into `--db`; the JSON `state_db` path remains a compatibility field for shared configs, not a second source of truth merged into the canonical DB.
+
 ## Configuration
 
 Project config is loaded from the first existing path in this order:
