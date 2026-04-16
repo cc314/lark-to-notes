@@ -96,6 +96,8 @@ def _derive_task_override(
         PromotionRec(promotion_rec)
 
     if directive.action is FeedbackAction.CONFIRM:
+        if task_class is not None and promotion_rec is None:
+            promotion_rec = _default_promotion_for(task_class)
         return TaskStatus.OPEN.value, task_class, promotion_rec
     if directive.action is FeedbackAction.DISMISS:
         return TaskStatus.DISMISSED.value, task_class, promotion_rec

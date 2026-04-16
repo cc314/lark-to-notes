@@ -4,8 +4,8 @@ Idempotency contract
 --------------------
 * :func:`upsert_task` is idempotent by ``fingerprint``: if a task with
   the same fingerprint already exists, the existing ``task_id`` is
-  returned and **no fields are changed**.  A new evidence row is always
-  added so repeated evidence accumulates without duplicating the task.
+  returned and **no fields are changed**. Provenance evidence is attached
+  for new raw records while exact raw-record repeats remain idempotent.
 * :func:`add_evidence` inserts a new row unconditionally; callers are
   responsible for de-duplicating if needed.
 * :func:`update_task_status` is a no-op when the task is already in a
@@ -68,6 +68,13 @@ def upsert_task(
     """
     existing = get_task_by_fingerprint(conn, fingerprint)
     if existing is not None:
+        _attach_provenance_evidence(
+            conn,
+            task_id=existing.task_id,
+            raw_record_id=created_from_raw_record_id,
+            excerpt=summary or title,
+            evidence_role="repetition",
+        )
         return existing.task_id, False
 
     task_id = str(uuid.uuid4())
@@ -100,6 +107,13 @@ def upsert_task(
             due_at,
             created_from_raw_record_id,
         ),
+    )
+    _attach_provenance_evidence(
+        conn,
+        task_id=task_id,
+        raw_record_id=created_from_raw_record_id,
+        excerpt=summary or title,
+        evidence_role="primary",
     )
     return task_id, True
 
@@ -162,6 +176,29 @@ def list_tasks(
             "SELECT * FROM tasks ORDER BY last_updated_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
+    return [TaskRecord.from_db_row(r) for r in rows]
+
+
+def list_review_feedback_candidates(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 200,
+) -> list[TaskRecord]:
+    """Return tasks that belong in the human review lane for feedback triage.
+
+    Includes rows whose lifecycle ``status`` is ``needs_review`` and rows
+    whose ``task_class`` is ``needs_review`` (defensive for mixed data).
+    """
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT * FROM tasks
+        WHERE status = ? OR task_class = ?
+        ORDER BY last_updated_at DESC
+        LIMIT ?
+        """,
+        (TaskStatus.NEEDS_REVIEW.value, TaskClass.NEEDS_REVIEW.value, limit),
+    ).fetchall()
     return [TaskRecord.from_db_row(r) for r in rows]
 
 
@@ -339,6 +376,38 @@ def add_evidence(
         ),
     )
     return evidence_id
+
+
+def _attach_provenance_evidence(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    raw_record_id: str | None,
+    excerpt: str,
+    evidence_role: str,
+) -> None:
+    if raw_record_id is None:
+        return
+    existing = conn.execute(
+        """
+        SELECT 1
+        FROM task_evidence
+        WHERE task_id = ?
+          AND raw_record_id = ?
+        LIMIT 1
+        """,
+        (task_id, raw_record_id),
+    ).fetchone()
+    if existing is not None:
+        return
+    add_evidence(
+        conn,
+        task_id,
+        raw_record_id=raw_record_id,
+        source_item_id=raw_record_id,
+        excerpt=excerpt[:240],
+        evidence_role=evidence_role,
+    )
 
 
 def list_evidence(

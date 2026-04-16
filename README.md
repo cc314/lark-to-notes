@@ -18,7 +18,7 @@ uv sync --dev
 uv run lark-to-notes --help
 ```
 
-Current reality, in one sentence: the offline replay -> classify -> render workflow is implemented and tested, while live sync commands are scaffolded but depend on an external worker module that is not present in this checkout.
+Current reality, in one sentence: the offline replay -> classify -> render workflow is implemented and tested; the repo now also has an in-tree mixed poll/event chat-intake ledger, while the live transport commands still depend on an external worker module that is not present in this checkout.
 
 ```text
 JSONL capture / fixture corpus
@@ -73,7 +73,8 @@ Important work arrives in Lark chats, docs, comments, and follow-ups, but it is 
 | Daily-note rendering | Partially wired | Renderer exists, but the current CLI render path does not hydrate `event_date`, so daily-note output is not yet end-to-end in the offline flow |
 | Feedback import | Implemented | YAML sidecars update tasks and persist feedback events |
 | LLM routing | Interface ready | Budgeting, cache, and fallback logic exist, but no provider implementation ships in-tree |
-| Live sync/backfill | External dependency | `sync-once`, `sync-daemon`, and `backfill` expect `automation.lark_worker` on the Python path |
+| Mixed chat intake ledger | Implemented in-tree | Poll and event observations can converge on one canonical SQLite intake row with coalescing and idempotent raw capture, but no self-contained live event subscriber ships in this checkout |
+| Live sync/backfill | In-repo (`lark-cli`) | `sync-once`, `sync-daemon`, and `backfill` load the worker-style JSON config and run `lark_to_notes.live.chat_live.ChatLiveAdapter` into the canonical SQLite store (requires `lark-cli` and Lark auth) |
 
 ## Quick Example
 
@@ -261,17 +262,18 @@ uv run pytest
 | `render` | Render tasks into vault notes | `uv run lark-to-notes render --db var/lark-to-notes.db --vault-root demo-vault --limit 50 --json` |
 | `doctor` | Validate schema + fixture corpus + runtime health | `uv run lark-to-notes doctor --db var/lark-to-notes.db --fixture-corpus tests/fixtures/lark-worker/fixture-corpus --json` |
 | `feedback import` | Apply YAML feedback into SQLite and task overrides | `uv run lark-to-notes feedback import feedback.yaml --db var/lark-to-notes.db --json` |
+| `feedback draft` | Emit a YAML stub for review-lane tasks (edit actions, then `feedback import`) | `uv run lark-to-notes feedback draft --db var/lark-to-notes.db --out review.yaml --json` |
 | `reconcile` | Compare stored checkpoints against source state | `uv run lark-to-notes reconcile --db var/lark-to-notes.db --json` |
 | `budget status` | Inspect recorded usage, fallbacks, and quality metrics | `uv run lark-to-notes budget status --db var/lark-to-notes.db --json` |
 | `sync-once` | Poll enabled live sources once | `uv run lark-to-notes sync-once --config /path/to/worker.json --db var/lark-to-notes.db --json` |
 | `sync-daemon` | Run repeated live polling cycles | `uv run lark-to-notes sync-daemon --config /path/to/worker.json --db var/lark-to-notes.db --max-cycles 2 --json` |
-| `backfill` | Re-ingest live history through the worker service | `uv run lark-to-notes backfill --config /path/to/worker.json --db var/lark-to-notes.db --days 14 --json` |
+| `backfill` | Re-ingest live history via `lark-cli` polling | `uv run lark-to-notes backfill --config /path/to/worker.json --db var/lark-to-notes.db --days 14 --json` |
 
 Notes on the live commands:
 
 - they are part of the CLI surface today
-- they dynamically import `automation.lark_worker.*`
-- that module is not present in this checkout, so those commands are integration points, not turnkey commands, unless you provide that dependency separately
+- they use the same JSON config shape as the historical worker, but run entirely in-tree via `ChatLiveAdapter`
+- they require a working `lark-cli` install and user credentials with access to the configured sources
 
 ## Configuration
 
@@ -308,17 +310,31 @@ tasks:
     action: wrong_class
     task_class: task
     comment: This is a concrete task, not just a review item.
-source_items: {}
+source_items:
+  msg-456:
+    action: missed_task
+    title: Follow up with procurement
+    task_class: task
+    comment: This was missed on the first pass.
 ```
 
-Supported task actions:
+Task-targeted actions:
 
 - `confirm`
 - `dismiss`
 - `merge`
 - `snooze`
 - `wrong_class`
+
+Source-item actions:
+
 - `missed_task`
+
+Notes:
+
+- `missed_task` is only valid under `source_items`, not `tasks`.
+- `missed_task` requires `title` and `task_class`; if `promotion_rec` is omitted, it defaults from `task_class`.
+- Task-targeted actions persist operator intent in `manual_override_state`; `confirm` can also pin fields like `title`, `summary`, `due_at`, `task_class`, and `promotion_rec` when the operator wants replay-stable overrides instead of a bare reopen.
 
 ## Architecture
 
@@ -329,6 +345,8 @@ fixture JSONL or worker output
             |
             v
    intake.replay / intake.ledger
+            |
+            +--> chat_intake_ledger (mixed poll/event chat sightings)
             |
             v
       raw_messages (SQLite)
@@ -379,6 +397,7 @@ llm_usage_records + content_cache
 |---|---|
 | `watched_sources` | Govern which sources exist locally |
 | `checkpoints` | Store per-source cursors |
+| `chat_intake_ledger` | Canonical mixed poll/event chat observations before raw capture |
 | `raw_messages` | Durable raw intake ledger |
 | `intake_runs` | Audit replay/intake sessions |
 | `tasks` | Stable task registry |
@@ -450,9 +469,9 @@ uv run lark-to-notes doctor \
 
 That script currently points at `raw/lark-worker/fixture-corpus`, not the checked-in test corpus location. Use `uv run pytest` and the explicit `doctor --fixture-corpus ...` command as the reliable verification path for this checkout.
 
-### `sync-once`, `sync-daemon`, or `backfill` fail with import errors
+### `sync-once`, `sync-daemon`, or `backfill` fail at load time
 
-Those commands dynamically import `automation.lark_worker`. The module is not present in this repository tree, so live sync is not self-contained here. Use the offline `replay` workflow unless you have the worker package available separately.
+Check that `--config` points to valid JSON with `vault_root`, `state_db`, and `sources`. Malformed JSON raises a clear error from the in-repo config loader. If `lark-cli` is missing or misconfigured, failures surface as runtime errors from the live adapter.
 
 ### `sync-once` reports auth or scope problems
 
@@ -477,7 +496,7 @@ That is expected. The budget layer records fallbacks and cache hits too. The num
 - The self-contained, reliable path today is offline replay from JSONL, not live Lark polling.
 - No LLM provider implementation ships in-tree, even though routing and budget hooks exist.
 - The current CLI render path does not yet create daily-note output end to end.
-- Live worker commands assume `automation.lark_worker` exists elsewhere.
+- Live commands depend on `lark-cli` and real Lark access; the offline `replay` path remains the turnkey way to exercise the pipeline without credentials.
 - The implementation is intentionally narrower than the full plan in [`plan_for_lark_to_notes_workflow.md`](plan_for_lark_to_notes_workflow.md), especially around rich document/comment revision modeling and broader vault promotion flows.
 
 ## FAQ
@@ -488,7 +507,7 @@ Both in intent, but this checkout is primarily the Python implementation plus it
 
 ### Does `lark-to-notes` talk to Lark directly right now?
 
-Not in the self-contained offline flow. The core package replays JSONL and manages local state. The live commands delegate to a separate worker integration.
+Not in the self-contained offline flow. The core package replays JSONL and manages local state. The live commands call `lark-cli` through the in-repo live adapter.
 
 ### Do I need LLM access to use it?
 

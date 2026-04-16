@@ -9,17 +9,34 @@ from pathlib import Path
 
 import pytest
 
+from lark_to_notes.config.sources import SourceType, WatchedSource
 from lark_to_notes.intake.ledger import (
+    chat_ingest_key,
     count_raw_messages,
+    document_ingest_key,
     finish_intake_run,
+    get_chat_intake_item,
     get_raw_message,
     insert_raw_message,
     list_raw_messages,
+    list_ready_chat_intake,
+    list_ready_document_intake,
+    mark_document_intake_processed,
+    observe_chat_message,
+    observe_document_surface,
     start_intake_run,
 )
-from lark_to_notes.intake.models import RawMessage, _parse_note_date
+from lark_to_notes.intake.models import (
+    ChatEventAction,
+    ChatIntakeState,
+    DocumentLifecycleState,
+    DocumentRecordType,
+    IntakePath,
+    RawMessage,
+    _parse_note_date,
+)
 from lark_to_notes.intake.replay import replay_jsonl_dir, replay_jsonl_file
-from lark_to_notes.storage.db import connect, init_db
+from lark_to_notes.storage.db import connect, init_db, upsert_watched_source
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,6 +47,21 @@ def _mem() -> sqlite3.Connection:
     conn = connect(":memory:")
     init_db(conn)
     return conn
+
+
+def _ensure_doc_watched(conn: sqlite3.Connection, source_id: str = "doc:docx1") -> None:
+    """``document_intake_ledger`` rows require a matching ``watched_sources`` row."""
+
+    _type, external_id = source_id.split(":", 1)
+    upsert_watched_source(
+        conn,
+        WatchedSource(
+            source_id=source_id,
+            source_type=SourceType(_type),
+            external_id=external_id,
+            name="Fixture doc",
+        ),
+    )
 
 
 def _make_msg(
@@ -212,6 +244,234 @@ def test_count_raw_messages_by_source() -> None:
     insert_raw_message(conn, _make_msg(message_id="b0", source_id="group:g1"))
     assert count_raw_messages(conn, source_id="dm:u1") == 3
     assert count_raw_messages(conn, source_id="group:g1") == 1
+
+
+def test_event_observation_stays_pending_until_coalesce_window_expires() -> None:
+    conn = _mem()
+    msg = _make_msg()
+
+    item = observe_chat_message(
+        conn,
+        msg,
+        intake_path=IntakePath.EVENT,
+        observed_at="2026-04-14T10:00:00Z",
+        coalesce_window_seconds=60,
+    )
+
+    assert item.processing_state is ChatIntakeState.PENDING
+    assert item.event_seen_count == 1
+    assert item.poll_seen_count == 0
+    assert list_ready_chat_intake(conn, as_of="2026-04-14T10:00:59Z") == []
+    assert [
+        ready.ingest_key for ready in list_ready_chat_intake(conn, as_of="2026-04-14T10:01:00Z")
+    ] == [item.ingest_key]
+
+
+def test_event_burst_extends_the_coalescing_window() -> None:
+    conn = _mem()
+    msg = _make_msg()
+    observe_chat_message(
+        conn,
+        msg,
+        intake_path=IntakePath.EVENT,
+        observed_at="2026-04-14T10:00:00Z",
+        coalesce_window_seconds=60,
+    )
+    item = observe_chat_message(
+        conn,
+        msg,
+        intake_path=IntakePath.EVENT,
+        observed_at="2026-04-14T10:00:30Z",
+        coalesce_window_seconds=60,
+    )
+
+    assert item.coalesce_until == "2026-04-14T10:01:30Z"
+    assert item.event_seen_count == 2
+    assert list_ready_chat_intake(conn, as_of="2026-04-14T10:01:29Z") == []
+
+
+def test_poll_observation_short_circuits_pending_event() -> None:
+    conn = _mem()
+    msg = _make_msg()
+    observe_chat_message(
+        conn,
+        msg,
+        intake_path=IntakePath.EVENT,
+        observed_at="2026-04-14T10:00:00Z",
+        coalesce_window_seconds=120,
+    )
+    item = observe_chat_message(
+        conn,
+        msg,
+        intake_path=IntakePath.POLL,
+        observed_at="2026-04-14T10:00:30Z",
+    )
+
+    assert item.poll_seen_count == 1
+    assert item.event_seen_count == 1
+    assert item.coalesce_until == "2026-04-14T10:00:30Z"
+    assert [
+        ready.ingest_key for ready in list_ready_chat_intake(conn, as_of="2026-04-14T10:00:30Z")
+    ] == [item.ingest_key]
+
+
+def test_processed_item_tracks_later_duplicate_observations_without_requeueing() -> None:
+    conn = _mem()
+    msg = _make_msg()
+    item = observe_chat_message(
+        conn,
+        msg,
+        intake_path=IntakePath.POLL,
+        observed_at="2026-04-14T10:00:00Z",
+    )
+    conn.execute(
+        "UPDATE chat_intake_ledger SET processing_state = ?, processed_at = ? WHERE ingest_key = ?",
+        (ChatIntakeState.PROCESSED.value, "2026-04-14T10:00:10Z", item.ingest_key),
+    )
+    conn.commit()
+
+    updated = observe_chat_message(
+        conn,
+        msg,
+        intake_path=IntakePath.EVENT,
+        observed_at="2026-04-14T10:00:20Z",
+    )
+
+    assert updated.processing_state is ChatIntakeState.PROCESSED
+    assert updated.processed_at == "2026-04-14T10:00:10Z"
+    assert updated.event_seen_count == 1
+    assert list_ready_chat_intake(conn, as_of="2026-04-14T10:00:20Z") == []
+
+
+def test_unsupported_edit_event_is_rejected() -> None:
+    conn = _mem()
+
+    with pytest.raises(ValueError, match="only create chat events are supported"):
+        observe_chat_message(
+            conn,
+            _make_msg(),
+            intake_path=IntakePath.EVENT,
+            event_action=ChatEventAction.EDIT,
+        )
+
+
+def test_chat_ingest_key_is_stable_for_source_and_message_identity() -> None:
+    assert chat_ingest_key("dm:u1", "msg-1") == chat_ingest_key("dm:u1", "msg-1")
+    assert chat_ingest_key("dm:u1", "msg-1") != chat_ingest_key("dm:u2", "msg-1")
+    assert get_chat_intake_item(_mem(), chat_ingest_key("dm:u1", "missing")) is None
+
+
+def test_document_ingest_key_is_stable() -> None:
+    k = document_ingest_key(
+        "doc:tok1",
+        DocumentRecordType.DOC_COMMENT,
+        "doc:tok1:comments",
+        "cmt-9",
+    )
+    assert k == document_ingest_key(
+        "doc:tok1",
+        DocumentRecordType.DOC_COMMENT,
+        "doc:tok1:comments",
+        "cmt-9",
+    )
+    assert k != document_ingest_key(
+        "doc:tok1",
+        DocumentRecordType.DOC_REPLY,
+        "doc:tok1:comments",
+        "cmt-9",
+    )
+
+
+def test_document_poll_observation_is_ready_immediately() -> None:
+    conn = _mem()
+    _ensure_doc_watched(conn, "doc:tok1")
+    item = observe_document_surface(
+        conn,
+        record_type=DocumentRecordType.DOC_BODY,
+        source_id="doc:tok1",
+        document_token="tok1",
+        source_stream_id="doc:tok1:body",
+        source_item_id="body",
+        content_hash="h1",
+        normalized_text="Hello doc",
+        payload={"rev": "1"},
+        intake_path=IntakePath.POLL,
+        observed_at="2026-04-14T10:00:00Z",
+    )
+    assert item.processing_state is ChatIntakeState.PENDING
+    assert list_ready_document_intake(conn, as_of="2026-04-14T10:00:00Z") == [item]
+
+
+def test_document_processed_duplicate_observation_skips_requeue() -> None:
+    conn = _mem()
+    _ensure_doc_watched(conn, "doc:tok1")
+    item = observe_document_surface(
+        conn,
+        record_type=DocumentRecordType.DOC_COMMENT,
+        source_id="doc:tok1",
+        document_token="tok1",
+        source_stream_id="doc:tok1:comments",
+        source_item_id="c1",
+        content_hash="ab",
+        normalized_text="thread",
+        payload={},
+        intake_path=IntakePath.POLL,
+        observed_at="2026-04-14T10:00:00Z",
+    )
+    mark_document_intake_processed(conn, item.ingest_key, processed_at="2026-04-14T10:00:05Z")
+    again = observe_document_surface(
+        conn,
+        record_type=DocumentRecordType.DOC_COMMENT,
+        source_id="doc:tok1",
+        document_token="tok1",
+        source_stream_id="doc:tok1:comments",
+        source_item_id="c1",
+        content_hash="ab",
+        normalized_text="thread",
+        payload={"touch": True},
+        intake_path=IntakePath.EVENT,
+        observed_at="2026-04-14T10:00:10Z",
+    )
+    assert again.processing_state is ChatIntakeState.PROCESSED
+    assert again.processed_at == "2026-04-14T10:00:05Z"
+    assert again.event_seen_count == 1
+    assert list_ready_document_intake(conn, as_of="2026-04-14T10:00:10Z") == []
+
+
+def test_document_substantive_change_after_processed_reopens_pending() -> None:
+    conn = _mem()
+    _ensure_doc_watched(conn, "doc:tok1")
+    item = observe_document_surface(
+        conn,
+        record_type=DocumentRecordType.DOC_BODY,
+        source_id="doc:tok1",
+        document_token="tok1",
+        source_stream_id="doc:tok1:body",
+        source_item_id="body",
+        content_hash="h1",
+        normalized_text="v1",
+        payload={},
+        intake_path=IntakePath.POLL,
+        observed_at="2026-04-14T10:00:00Z",
+    )
+    mark_document_intake_processed(conn, item.ingest_key, processed_at="2026-04-14T10:00:05Z")
+    edited = observe_document_surface(
+        conn,
+        record_type=DocumentRecordType.DOC_BODY,
+        source_id="doc:tok1",
+        document_token="tok1",
+        source_stream_id="doc:tok1:body",
+        source_item_id="body",
+        content_hash="h2",
+        normalized_text="v2",
+        payload={},
+        intake_path=IntakePath.POLL,
+        observed_at="2026-04-14T10:00:20Z",
+        lifecycle_state=DocumentLifecycleState.EDITED,
+    )
+    assert edited.processing_state is ChatIntakeState.PENDING
+    assert edited.content_hash == "h2"
+    assert edited.lifecycle_state is DocumentLifecycleState.EDITED
 
 
 # ---------------------------------------------------------------------------

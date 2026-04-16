@@ -94,6 +94,36 @@ def test_doctor_json_reports_fixture_health(capsys: pytest.CaptureFixture[str]) 
     assert payload["replay"]["matches_manifest"] is True
 
 
+def test_feedback_draft_writes_review_lane_stub(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from lark_to_notes.feedback.draft import DRAFT_ACTION_PLACEHOLDER
+
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    task_id, _ = upsert_task(
+        conn,
+        fingerprint="cli-draft-00000001",
+        title="Ambiguous request",
+        task_class="needs_review",
+        confidence_band="low",
+        reason_code="long_content_no_signal",
+        promotion_rec="review",
+    )
+    conn.commit()
+    out_path = tmp_path / "review-draft.yaml"
+    exit_code = run(["feedback", "draft", "--db", str(db_path), "--out", str(out_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["task_count"] == 1
+    assert payload["task_ids"] == [task_id]
+    text = out_path.read_text(encoding="utf-8")
+    assert task_id in text
+    assert DRAFT_ACTION_PLACEHOLDER in text
+
+
 def test_feedback_import_json_applies_artifact(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -348,6 +378,63 @@ def test_reclassify_source_filter(
     assert payload["messages_processed"] == 0
 
 
+def test_reclassify_accepts_custom_high_pattern(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _insert_test_message(conn, "om_rcl_custom_1", "Someday we revisit this workflow")
+    conn.commit()
+
+    exit_code = run(
+        [
+            "reclassify",
+            "--db",
+            str(db_path),
+            "--extra-high-pattern",
+            r"(?i)\bsomeday\b::custom_someday",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    row = conn.execute("SELECT task_class, confidence_band, reason_code FROM tasks").fetchone()
+    assert exit_code == 0
+    assert payload["tasks_inserted"] == 1
+    assert row is not None
+    assert row[0] == "task"
+    assert row[1] == "high"
+    assert row[2] == "custom_someday"
+
+
+def test_reclassify_invalid_pattern_format_returns_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "state.db"
+    conn = connect(db_path)
+    init_db(conn)
+    _insert_test_message(conn, "om_rcl_bad_pattern", "Please review this")
+    conn.commit()
+
+    exit_code = run(
+        [
+            "reclassify",
+            "--db",
+            str(db_path),
+            "--extra-high-pattern",
+            "not-a-valid-pattern",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert "REGEX::SIGNAL" in payload["error"]
+
+
 # ---------------------------------------------------------------------------
 # render
 # ---------------------------------------------------------------------------
@@ -574,24 +661,63 @@ def test_budget_status_includes_quality_metrics(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from lark_to_notes.tasks.registry import upsert_task
+
     db_path = tmp_path / "state.db"
     conn = connect(db_path)
     init_db(conn)
     conn.execute(
         """
-        INSERT INTO feedback_events (
-            feedback_id, target_type, target_id, action, artifact_path
-        ) VALUES (?, ?, ?, ?, '')
+        INSERT INTO raw_messages (
+            message_id, source_id, source_type, chat_id, chat_type,
+            sender_id, sender_name, direction, created_at, content, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        ("feedback-confirm-1", "task", "task-1", "confirm"),
+        (
+            "cli-msg-task-1",
+            "dm:cli",
+            "dm_user",
+            "chat-cli",
+            "dm",
+            "ou_cli",
+            "CLI User",
+            "inbound",
+            "2026-04-16T08:00:00Z",
+            "Please send the revised budget update.",
+            "{}",
+        ),
+    )
+    task_id, _ = upsert_task(
+        conn,
+        fingerprint="cliquality000001",
+        title="Send the revised budget update",
+        task_class="task",
+        confidence_band="high",
+        reason_code="en_please_verb",
+        promotion_rec="current_tasks",
+        created_from_raw_record_id="cli-msg-task-1",
     )
     conn.execute(
         """
         INSERT INTO feedback_events (
-            feedback_id, target_type, target_id, action, artifact_path
-        ) VALUES (?, ?, ?, ?, '')
+            feedback_id, target_type, target_id, action, payload_json, artifact_path
+        ) VALUES (?, ?, ?, ?, ?, '')
         """,
-        ("feedback-dismiss-1", "task", "task-2", "dismiss"),
+        (
+            "feedback-confirm-1",
+            "task",
+            task_id,
+            "confirm",
+            '{"action":"confirm","policy_version":"policy-v1","promotion_rec":"current_tasks"}',
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO feedback_events (
+            feedback_id, target_type, target_id, action, payload_json, artifact_path
+        ) VALUES (?, ?, ?, ?, ?, '')
+        """,
+        ("feedback-dismiss-1", "task", "task-2", "dismiss", '{"action":"dismiss"}'),
     )
     conn.commit()
 
@@ -602,6 +728,19 @@ def test_budget_status_includes_quality_metrics(
     assert payload["quality_metrics"]["total_events"] == 2
     assert payload["quality_metrics"]["confirm_count"] == 1
     assert payload["quality_metrics"]["dismiss_count"] == 1
+    assert payload["quality_metrics_scopes"]["rolling_7d"]["total_events"] == 2
+    assert payload["quality_metrics_scopes"]["rolling_30d"]["total_events"] == 2
+    assert payload["quality_metrics_scopes"]["by_artifact_path"]["unknown"]["total_events"] == 2
+    assert payload["quality_metrics_scopes"]["by_day"]
+    assert payload["quality_metrics_breakdown"]["by_target_type"]["task"]["total_events"] == 2
+    assert payload["quality_metrics_breakdown"]["by_source_type"]["dm_user"]["confirm_count"] == 1
+    assert (
+        payload["quality_metrics_breakdown"]["by_policy_version"]["policy-v1"]["confirm_count"] == 1
+    )
+    assert (
+        payload["quality_metrics_breakdown"]["by_promotion_rec"]["current_tasks"]["confirm_count"]
+        == 1
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +775,7 @@ def test_sync_once_json_runs_worker_service(
     fake_config = FakeConfig()
     fake_service = FakeService(fake_config)
     monkeypatch.setattr(
-        "lark_to_notes.cli._load_worker_service", lambda _: (fake_config, fake_service)
+        "lark_to_notes.cli._load_worker_service", lambda _path, _conn: (fake_config, fake_service)
     )
     monkeypatch.setattr("lark_to_notes.cli._mirror_worker_state", lambda _conn, _config: None)
 
@@ -658,6 +797,45 @@ def test_sync_once_json_runs_worker_service(
     assert payload["distilled_items"] == 1
     assert payload["sync_notes"] is True
     assert payload["runtime"]["run_count_total"] == 1
+
+
+def test_sync_once_in_repo_adapter_without_external_worker(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live sync uses ``ChatLiveAdapter`` + JSON config (no ``automation.lark_worker``)."""
+
+    from lark_to_notes.live.chat_live import ChatLiveAdapter
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    cfg = {
+        "vault_root": str(vault),
+        "state_db": str(tmp_path / "legacy-worker.db"),
+        "poll_interval_seconds": 300,
+        "poll_lookback_days": 7,
+        "sources": [],
+    }
+    cfg_path = tmp_path / "live.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    db_path = tmp_path / "runtime.db"
+
+    calls: list[bool] = []
+
+    def fake_poll(self: ChatLiveAdapter, *, sync_notes: bool) -> dict[str, int]:
+        _ = self
+        calls.append(sync_notes)
+        return {"inserted_messages": 0, "distilled_items": 0, "sources_scanned": 0}
+
+    monkeypatch.setattr(ChatLiveAdapter, "poll_once", fake_poll)
+
+    exit_code = run(["sync-once", "--db", str(db_path), "--config", str(cfg_path), "--json"])
+    assert exit_code == 0
+    assert calls == [True]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["inserted_messages"] == 0
+    assert payload["distilled_items"] == 0
 
 
 def test_backfill_json_runs_worker_service(
@@ -695,7 +873,7 @@ def test_backfill_json_runs_worker_service(
     fake_config = FakeConfig()
     fake_service = FakeService(fake_config)
     monkeypatch.setattr(
-        "lark_to_notes.cli._load_worker_service", lambda _: (fake_config, fake_service)
+        "lark_to_notes.cli._load_worker_service", lambda _path, _conn: (fake_config, fake_service)
     )
     monkeypatch.setattr("lark_to_notes.cli._mirror_worker_state", lambda _conn, _config: None)
 
@@ -756,7 +934,7 @@ def test_sync_daemon_json_runs_multiple_cycles(
     fake_config = FakeConfig()
     fake_service = FakeService(fake_config)
     monkeypatch.setattr(
-        "lark_to_notes.cli._load_worker_service", lambda _: (fake_config, fake_service)
+        "lark_to_notes.cli._load_worker_service", lambda _path, _conn: (fake_config, fake_service)
     )
     monkeypatch.setattr("lark_to_notes.cli._mirror_worker_state", lambda _conn, _config: None)
 
@@ -793,7 +971,7 @@ def test_sync_once_auth_error_prints_recovery_guidance(
 ) -> None:
     monkeypatch.setattr(
         "lark_to_notes.cli._load_worker_service",
-        lambda _path: (_ for _ in ()).throw(RuntimeError("auth expired")),
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("auth expired")),
     )
 
     exit_code = run(
@@ -809,6 +987,62 @@ def test_sync_once_auth_error_prints_recovery_guidance(
     out = capsys.readouterr().out
     assert exit_code == 1
     assert "lark-cli auth login --as user" in out
+
+
+def test_sync_once_auth_error_json_includes_stage_and_kind(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "lark_to_notes.cli._load_worker_service",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("auth expired")),
+    )
+
+    exit_code = run(
+        [
+            "sync-once",
+            "--db",
+            str(tmp_path / "state.db"),
+            "--config",
+            str(tmp_path / "worker.json"),
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["error_kind"] == "auth_scope"
+    assert payload["auth_related"] is True
+    assert payload["stage"] == "load_worker_service"
+    assert payload["next_actions"]
+
+
+def test_sync_once_non_auth_error_json_classifies_runtime_failure(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "lark_to_notes.cli._load_worker_service",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("network timeout")),
+    )
+
+    exit_code = run(
+        [
+            "sync-once",
+            "--db",
+            str(tmp_path / "state.db"),
+            "--config",
+            str(tmp_path / "worker.json"),
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["error_kind"] == "runtime_failure"
+    assert payload["auth_related"] is False
 
 
 def test_reconcile_live_mode_repairs_and_verifies(
@@ -855,7 +1089,7 @@ def test_reconcile_live_mode_repairs_and_verifies(
     fake_config = FakeConfig()
     fake_service = FakeService(fake_config)
     monkeypatch.setattr(
-        "lark_to_notes.cli._load_worker_service", lambda _: (fake_config, fake_service)
+        "lark_to_notes.cli._load_worker_service", lambda _path, _conn: (fake_config, fake_service)
     )
 
     mirror_calls = {"count": 0}
@@ -1133,7 +1367,15 @@ def test_doctor_json_has_all_expected_keys(
 
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 0
-    for key in ("status", "schema_version", "db_path", "fixture_corpus", "replay", "runtime"):
+    for key in (
+        "status",
+        "schema_version",
+        "db_path",
+        "fixture_corpus",
+        "replay",
+        "runtime",
+        "runtime_diagnostics",
+    ):
         assert key in payload, f"missing key: {key!r}"
     for key in (
         "file_count",
@@ -1145,6 +1387,8 @@ def test_doctor_json_has_all_expected_keys(
         assert key in payload["replay"], f"missing replay key: {key!r}"
     for key in ("record_count", "scenario_count", "missing_scenarios", "source_access_surfaces"):
         assert key in payload["fixture_corpus"], f"missing fixture_corpus key: {key!r}"
+    for key in ("recent_failed_runs", "recent_dead_letters"):
+        assert key in payload["runtime_diagnostics"], f"missing runtime_diagnostics key: {key!r}"
 
 
 def test_doctor_human_readable_output(

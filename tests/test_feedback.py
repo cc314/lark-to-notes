@@ -17,6 +17,10 @@ from lark_to_notes.feedback import (
     parse_feedback_artifact,
     render_feedback_artifact,
 )
+from lark_to_notes.feedback.draft import (
+    DRAFT_ACTION_PLACEHOLDER,
+    render_feedback_draft_yaml,
+)
 from lark_to_notes.storage.db import init_db
 from lark_to_notes.tasks.registry import get_task, upsert_task
 
@@ -42,6 +46,17 @@ def _make_review_task(conn: sqlite3.Connection, *, fingerprint: str = "feedback0
     return task_id
 
 
+def test_feedback_draft_yaml_rejects_import_until_edited(conn: sqlite3.Connection) -> None:
+    task_id = _make_review_task(conn, fingerprint="feedback-draft-0001")
+    record = get_task(conn, task_id)
+    assert record is not None
+    yaml_text = render_feedback_draft_yaml([record])
+    assert DRAFT_ACTION_PLACEHOLDER in yaml_text
+    assert task_id in yaml_text
+    with pytest.raises(ValueError, match="not a valid FeedbackAction"):
+        parse_feedback_artifact(yaml_text)
+
+
 def test_feedback_artifact_round_trip_yaml() -> None:
     artifact = FeedbackArtifact(
         tasks={
@@ -49,6 +64,7 @@ def test_feedback_artifact_round_trip_yaml() -> None:
                 action=FeedbackAction.WRONG_CLASS,
                 task_class="task",
                 promotion_rec="current_tasks",
+                policy_version="policy-v1",
                 comment="This is explicit work, not just a review candidate.",
                 actor_ref="alice",
             ),
@@ -60,6 +76,7 @@ def test_feedback_artifact_round_trip_yaml() -> None:
                 summary="Operator spotted a missed action item in the source note.",
                 task_class="task",
                 promotion_rec="current_tasks",
+                policy_version="policy-v1",
                 comment="Missed on first pass.",
             ),
         },
@@ -69,6 +86,71 @@ def test_feedback_artifact_round_trip_yaml() -> None:
     reparsed = parse_feedback_artifact(rendered)
 
     assert reparsed == artifact
+
+
+def test_apply_feedback_persists_policy_version_in_event_payload(
+    conn: sqlite3.Connection,
+) -> None:
+    task_id = _make_review_task(conn, fingerprint="feedback-policy-version")
+    artifact = FeedbackArtifact(
+        tasks={
+            task_id: FeedbackDirective(
+                action=FeedbackAction.CONFIRM,
+                task_class="task",
+                policy_version="policy-v2",
+            ),
+        }
+    )
+
+    apply_feedback_artifact(conn, artifact, artifact_path="raw/review/policy-version.yaml")
+
+    events = list_feedback_events(conn, target_id=task_id)
+    assert len(events) == 1
+    assert events[0].payload["policy_version"] == "policy-v2"
+
+
+def test_parse_feedback_artifact_missed_task_requires_title() -> None:
+    with pytest.raises(ValueError, match="missed_task feedback requires title"):
+        parse_feedback_artifact(
+            """
+version: 1
+tasks: {}
+source_items:
+  msg-1:
+    action: missed_task
+    task_class: task
+"""
+        )
+
+
+def test_parse_feedback_artifact_missed_task_requires_task_class() -> None:
+    with pytest.raises(ValueError, match="missed_task feedback requires task_class"):
+        parse_feedback_artifact(
+            """
+version: 1
+tasks: {}
+source_items:
+  msg-1:
+    action: missed_task
+    title: Follow up with procurement
+"""
+        )
+
+
+def test_parse_feedback_artifact_missed_task_defaults_promotion_from_task_class() -> None:
+    artifact = parse_feedback_artifact(
+        """
+version: 1
+tasks: {}
+source_items:
+  msg-1:
+    action: missed_task
+    title: Follow up with procurement
+    task_class: task
+"""
+    )
+
+    assert artifact.source_items["msg-1"].promotion_rec == "current_tasks"
 
 
 def test_apply_feedback_wrong_class_updates_task_and_persists_event(
@@ -133,6 +215,38 @@ def test_apply_feedback_status_actions_update_task(
     assert task is not None
     assert task.status == expected_status
     assert json.loads(task.manual_override_state or "{}")["action"] == action.value
+
+
+def test_apply_feedback_confirm_can_pin_explicit_task_overrides(conn: sqlite3.Connection) -> None:
+    task_id = _make_review_task(conn, fingerprint="feedback-confirm-promote")
+    artifact = FeedbackArtifact(
+        tasks={
+            task_id: FeedbackDirective(
+                action=FeedbackAction.CONFIRM,
+                title="Send the revised budget update",
+                summary="Operator confirmed this should be promoted out of the review lane.",
+                task_class="task",
+                due_at="2026-04-18",
+            ),
+        }
+    )
+
+    apply_feedback_artifact(conn, artifact)
+
+    task = get_task(conn, task_id)
+    assert task is not None
+    assert task.status == "open"
+    assert task.title == "Send the revised budget update"
+    assert task.summary == "Operator confirmed this should be promoted out of the review lane."
+    assert task.task_class == "task"
+    assert task.promotion_rec == "current_tasks"
+    assert task.due_at == "2026-04-18"
+
+    override_state = json.loads(task.manual_override_state or "{}")
+    assert override_state["action"] == "confirm"
+    assert override_state["overrides"]["task_class"] == "task"
+    assert override_state["overrides"]["promotion_rec"] == "current_tasks"
+    assert override_state["overrides"]["due_at"] == "2026-04-18"
 
 
 def test_apply_feedback_merge_marks_task_and_records_merge_target(

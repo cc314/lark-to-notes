@@ -16,6 +16,7 @@ from lark_to_notes.tasks.registry import (
     get_task,
     get_task_by_fingerprint,
     list_evidence,
+    list_review_feedback_candidates,
     list_tasks,
     update_task_status,
     upsert_task,
@@ -103,6 +104,22 @@ def test_derive_fingerprint_different_content() -> None:
 def test_derive_fingerprint_different_source() -> None:
     fp1 = derive_fingerprint("Please review", "dm-alice:1", "2026-04-14 10:00")
     fp2 = derive_fingerprint("Please review", "dm-bob:1", "2026-04-14 10:00")
+    assert fp1 != fp2
+
+
+def test_derive_fingerprint_different_source_type() -> None:
+    fp1 = derive_fingerprint(
+        "Please review",
+        "shared-anchor:1",
+        "2026-04-14 10:00",
+        source_type="dm_user",
+    )
+    fp2 = derive_fingerprint(
+        "Please review",
+        "shared-anchor:1",
+        "2026-04-14 10:00",
+        source_type="doc_comment",
+    )
     assert fp1 != fp2
 
 
@@ -305,6 +322,21 @@ def test_list_tasks_filtered_by_status(conn: sqlite3.Connection) -> None:
     assert len(review_tasks) == 1
 
 
+def test_list_review_feedback_candidates_matches_review_lane(conn: sqlite3.Connection) -> None:
+    _make_task(conn, fingerprint="fp_open_lane00001", confidence_band="high")
+    review_id, _ = upsert_task(
+        conn,
+        fingerprint="fp_review_lane0001",
+        title="Low conf",
+        task_class="needs_review",
+        confidence_band="low",
+        reason_code="x",
+        promotion_rec="review",
+    )
+    found = list_review_feedback_candidates(conn)
+    assert [t.task_id for t in found] == [review_id]
+
+
 # ---------------------------------------------------------------------------
 # Registry: update_task_status
 # ---------------------------------------------------------------------------
@@ -468,6 +500,88 @@ def test_upsert_replay_returns_same_task_id(conn: sqlite3.Connection) -> None:
     assert c1 is True
     assert c2 is False
     assert len(list_tasks(conn)) == 1
+
+
+def test_upsert_task_records_primary_provenance_evidence(conn: sqlite3.Connection) -> None:
+    fp = derive_fingerprint("Please send report", "dm-bob:s1", "2026-04-14 10:00")
+    task_id, created = upsert_task(
+        conn,
+        fingerprint=fp,
+        title="Send report",
+        task_class="task",
+        confidence_band="high",
+        reason_code="en_please_verb",
+        promotion_rec="current_tasks",
+        created_from_raw_record_id="om_source_1",
+    )
+    assert created is True
+    evidence = list_evidence(conn, task_id)
+    assert len(evidence) == 1
+    assert evidence[0].raw_record_id == "om_source_1"
+    assert evidence[0].evidence_role == "primary"
+
+
+def test_upsert_task_duplicate_adds_repetition_evidence_for_new_raw_record(
+    conn: sqlite3.Connection,
+) -> None:
+    fp = derive_fingerprint("Please send report", "dm-bob:s1", "2026-04-14 10:00")
+    task_id, _ = upsert_task(
+        conn,
+        fingerprint=fp,
+        title="Send report",
+        task_class="task",
+        confidence_band="high",
+        reason_code="en_please_verb",
+        promotion_rec="current_tasks",
+        created_from_raw_record_id="om_source_1",
+    )
+    same_task_id, created = upsert_task(
+        conn,
+        fingerprint=fp,
+        title="Send report",
+        task_class="task",
+        confidence_band="high",
+        reason_code="en_please_verb",
+        promotion_rec="current_tasks",
+        created_from_raw_record_id="om_source_2",
+    )
+    assert created is False
+    assert same_task_id == task_id
+    evidence = list_evidence(conn, task_id)
+    assert len(evidence) == 2
+    roles_by_raw = {item.raw_record_id: item.evidence_role for item in evidence}
+    assert roles_by_raw["om_source_1"] == "primary"
+    assert roles_by_raw["om_source_2"] == "repetition"
+
+
+def test_upsert_task_duplicate_same_raw_record_keeps_evidence_idempotent(
+    conn: sqlite3.Connection,
+) -> None:
+    fp = derive_fingerprint("Please send report", "dm-bob:s1", "2026-04-14 10:00")
+    task_id, _ = upsert_task(
+        conn,
+        fingerprint=fp,
+        title="Send report",
+        task_class="task",
+        confidence_band="high",
+        reason_code="en_please_verb",
+        promotion_rec="current_tasks",
+        created_from_raw_record_id="om_source_same",
+    )
+    _same_task_id, created = upsert_task(
+        conn,
+        fingerprint=fp,
+        title="Send report",
+        task_class="task",
+        confidence_band="high",
+        reason_code="en_please_verb",
+        promotion_rec="current_tasks",
+        created_from_raw_record_id="om_source_same",
+    )
+    assert created is False
+    evidence = list_evidence(conn, task_id)
+    assert len(evidence) == 1
+    assert evidence[0].raw_record_id == "om_source_same"
 
 
 # ---------------------------------------------------------------------------

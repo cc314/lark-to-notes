@@ -1,3 +1,61 @@
 """Intake ledger, raw capture, and replay semantics."""
 
 from __future__ import annotations
+
+from lark_to_notes.intake.ledger import (
+    chat_ingest_key,
+    count_raw_messages,
+    document_ingest_key,
+    finish_intake_run,
+    get_chat_intake_item,
+    get_document_intake_item,
+    get_raw_message,
+    insert_raw_message,
+    list_raw_messages,
+    list_raw_messages_recent,
+    list_ready_chat_intake,
+    list_ready_document_intake,
+    mark_chat_intake_processed,
+    mark_document_intake_processed,
+    observe_chat_message,
+    observe_document_surface,
+    start_intake_run,
+)
+from lark_to_notes.intake.models import (
+    ChatEventAction,
+    ChatIntakeItem,
+    ChatIntakeState,
+    DocumentIntakeItem,
+    DocumentLifecycleState,
+    DocumentRecordType,
+    IntakePath,
+    RawMessage,
+)
+
+__all__ = [
+    "ChatEventAction",
+    "ChatIntakeItem",
+    "ChatIntakeState",
+    "DocumentIntakeItem",
+    "DocumentLifecycleState",
+    "DocumentRecordType",
+    "IntakePath",
+    "RawMessage",
+    "chat_ingest_key",
+    "count_raw_messages",
+    "document_ingest_key",
+    "finish_intake_run",
+    "get_chat_intake_item",
+    "get_document_intake_item",
+    "get_raw_message",
+    "insert_raw_message",
+    "list_raw_messages",
+    "list_raw_messages_recent",
+    "list_ready_chat_intake",
+    "list_ready_document_intake",
+    "mark_chat_intake_processed",
+    "mark_document_intake_processed",
+    "observe_chat_message",
+    "observe_document_surface",
+    "start_intake_run",
+]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 
@@ -134,4 +135,181 @@ class RawMessage:
             content=row.get("content", ""),
             payload=payload,
             ingested_at=row.get("ingested_at", ""),
+        )
+
+
+class IntakePath(StrEnum):
+    """How a chat message was observed by the live intake pipeline."""
+
+    POLL = "poll"
+    EVENT = "event"
+
+
+class ChatEventAction(StrEnum):
+    """Supported live chat event actions."""
+
+    CREATE = "create"
+    EDIT = "edit"
+    DELETE = "delete"
+
+
+class ChatIntakeState(StrEnum):
+    """Lifecycle state for one canonical chat-intake ledger row."""
+
+    PENDING = "pending"
+    PROCESSED = "processed"
+
+
+class DocumentRecordType(StrEnum):
+    """Which revision-bearing document surface a ledger row represents."""
+
+    DOC_BODY = "doc_body"
+    DOC_COMMENT = "doc_comment"
+    DOC_REPLY = "doc_reply"
+
+
+class DocumentLifecycleState(StrEnum):
+    """Mutable document-side lifecycle (distinct from chat message deletion)."""
+
+    ACTIVE = "active"
+    EDITED = "edited"
+    DELETED = "deleted"
+    SUPERSEDED = "superseded"
+
+
+@dataclass(frozen=True)
+class DocumentIntakeItem:
+    """One canonical row in ``document_intake_ledger`` for doc/comment/reply capture."""
+
+    ingest_key: str
+    record_type: DocumentRecordType
+    source_id: str
+    document_token: str
+    source_stream_id: str
+    source_item_id: str
+    parent_item_id: str
+    revision_id: str
+    lifecycle_state: DocumentLifecycleState
+    content_hash: str
+    normalized_text: str
+    payload: dict[str, Any]
+    canonical_link: str
+    first_seen_at: str
+    last_seen_at: str
+    first_intake_path: IntakePath
+    last_intake_path: IntakePath
+    poll_seen_count: int
+    event_seen_count: int
+    processing_state: ChatIntakeState = ChatIntakeState.PENDING
+    coalesce_until: str | None = None
+    processed_at: str | None = None
+    last_error: str = ""
+
+    @classmethod
+    def from_db_row(cls, row: dict[str, Any]) -> DocumentIntakeItem:
+        raw_payload = row.get("payload_json", "{}")
+        payload: dict[str, Any] = json.loads(raw_payload) if raw_payload else {}
+        return cls(
+            ingest_key=row["ingest_key"],
+            record_type=DocumentRecordType(row["record_type"]),
+            source_id=row["source_id"],
+            document_token=row.get("document_token", ""),
+            source_stream_id=row["source_stream_id"],
+            source_item_id=row["source_item_id"],
+            parent_item_id=row.get("parent_item_id", ""),
+            revision_id=row.get("revision_id", ""),
+            lifecycle_state=DocumentLifecycleState(
+                row.get("lifecycle_state", DocumentLifecycleState.ACTIVE)
+            ),
+            content_hash=row.get("content_hash", ""),
+            normalized_text=row.get("normalized_text", ""),
+            payload=payload,
+            canonical_link=row.get("canonical_link", ""),
+            first_seen_at=row["first_seen_at"],
+            last_seen_at=row["last_seen_at"],
+            first_intake_path=IntakePath(row["first_intake_path"]),
+            last_intake_path=IntakePath(row["last_intake_path"]),
+            poll_seen_count=int(row.get("poll_seen_count", 0)),
+            event_seen_count=int(row.get("event_seen_count", 0)),
+            processing_state=ChatIntakeState(row.get("processing_state", ChatIntakeState.PENDING)),
+            coalesce_until=row.get("coalesce_until"),
+            processed_at=row.get("processed_at"),
+            last_error=row.get("last_error", ""),
+        )
+
+
+@dataclass(frozen=True)
+class ChatIntakeItem:
+    """A canonical chat-intake ledger row for mixed poll/event observation."""
+
+    ingest_key: str
+    message_id: str
+    source_id: str
+    source_type: str
+    chat_id: str
+    chat_type: str
+    sender_id: str
+    sender_name: str
+    direction: str
+    created_at: str
+    content: str
+    payload: dict[str, Any]
+    first_seen_at: str
+    last_seen_at: str
+    first_intake_path: IntakePath
+    last_intake_path: IntakePath
+    poll_seen_count: int
+    event_seen_count: int
+    processing_state: ChatIntakeState = ChatIntakeState.PENDING
+    coalesce_until: str | None = None
+    processed_at: str | None = None
+    last_error: str = ""
+
+    @classmethod
+    def from_db_row(cls, row: dict[str, Any]) -> ChatIntakeItem:
+        """Build a :class:`ChatIntakeItem` from a SQLite row dict."""
+
+        raw_payload = row.get("payload_json", "{}")
+        payload: dict[str, Any] = json.loads(raw_payload) if raw_payload else {}
+        return cls(
+            ingest_key=row["ingest_key"],
+            message_id=row["message_id"],
+            source_id=row["source_id"],
+            source_type=row["source_type"],
+            chat_id=row["chat_id"],
+            chat_type=row.get("chat_type", ""),
+            sender_id=row.get("sender_id", ""),
+            sender_name=row.get("sender_name", ""),
+            direction=row.get("direction", "incoming"),
+            created_at=row.get("created_at", ""),
+            content=row.get("content", ""),
+            payload=payload,
+            first_seen_at=row["first_seen_at"],
+            last_seen_at=row["last_seen_at"],
+            first_intake_path=IntakePath(row["first_intake_path"]),
+            last_intake_path=IntakePath(row["last_intake_path"]),
+            poll_seen_count=int(row.get("poll_seen_count", 0)),
+            event_seen_count=int(row.get("event_seen_count", 0)),
+            processing_state=ChatIntakeState(row.get("processing_state", ChatIntakeState.PENDING)),
+            coalesce_until=row.get("coalesce_until"),
+            processed_at=row.get("processed_at"),
+            last_error=row.get("last_error", ""),
+        )
+
+    def to_raw_message(self) -> RawMessage:
+        """Project the ledger row into the canonical raw-message shape."""
+
+        return RawMessage(
+            message_id=self.message_id,
+            source_id=self.source_id,
+            source_type=self.source_type,
+            chat_id=self.chat_id,
+            chat_type=self.chat_type,
+            sender_id=self.sender_id,
+            sender_name=self.sender_name,
+            direction=self.direction,
+            created_at=self.created_at,
+            content=self.content,
+            payload=self.payload,
+            ingested_at=self.last_seen_at,
         )

@@ -39,6 +39,7 @@ class FeedbackDirective:
     summary: str | None = None
     task_class: str | None = None
     promotion_rec: str | None = None
+    policy_version: str | None = None
     merge_into_task_id: str | None = None
     due_at: str | None = None
 
@@ -60,6 +61,17 @@ class FeedbackDirective:
 
         if task_class is not None:
             TaskClass(task_class)
+        if (
+            promotion_rec is None
+            and task_class is not None
+            and action
+            in {
+                FeedbackAction.CONFIRM,
+                FeedbackAction.MISSED_TASK,
+                FeedbackAction.WRONG_CLASS,
+            }
+        ):
+            promotion_rec = _default_promotion_for(task_class)
         if promotion_rec is not None:
             PromotionRec(promotion_rec)
 
@@ -71,6 +83,7 @@ class FeedbackDirective:
             summary=_optional_string(data, "summary"),
             task_class=task_class,
             promotion_rec=promotion_rec,
+            policy_version=_optional_string(data, "policy_version"),
             merge_into_task_id=_optional_string(data, "merge_into_task_id"),
             due_at=_optional_string(data, "due_at"),
         )
@@ -86,6 +99,14 @@ class FeedbackDirective:
             and self.action is not FeedbackAction.MISSED_TASK
         ):
             raise ValueError("source_item feedback currently only supports missed_task")
+        if (
+            target_type is FeedbackTargetType.SOURCE_ITEM
+            and self.action is FeedbackAction.MISSED_TASK
+        ):
+            if self.title is None:
+                raise ValueError("missed_task feedback requires title")
+            if self.task_class is None:
+                raise ValueError("missed_task feedback requires task_class")
         if self.action is FeedbackAction.MERGE and not self.merge_into_task_id:
             raise ValueError("merge feedback requires merge_into_task_id")
         if self.action is FeedbackAction.WRONG_CLASS and self.task_class is None:
@@ -101,6 +122,7 @@ class FeedbackDirective:
             "summary": self.summary,
             "task_class": self.task_class,
             "promotion_rec": self.promotion_rec,
+            "policy_version": self.policy_version,
             "merge_into_task_id": self.merge_into_task_id,
             "due_at": self.due_at,
         }
@@ -209,3 +231,12 @@ def _optional_string(data: dict[str, object], key: str) -> str | None:
         raise ValueError(f"feedback field {key!r} must be a string when provided")
     stripped = value.strip()
     return stripped or None
+
+
+def _default_promotion_for(task_class: str) -> str:
+    normalized = TaskClass(task_class)
+    if normalized is TaskClass.TASK:
+        return PromotionRec.CURRENT_TASKS.value
+    if normalized is TaskClass.NEEDS_REVIEW:
+        return PromotionRec.REVIEW.value
+    return PromotionRec.DAILY_ONLY.value

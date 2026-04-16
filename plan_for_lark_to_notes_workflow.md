@@ -85,6 +85,40 @@ The following defaults should be treated as implementation decisions for v1 unle
    - `https://gotocompany.sg.larksuite.com/docx/D5IXd2EQLoZ3yvxY1WBlJi71gmf`
 5. Watched sources should be modeled as explicit allowlists with optional ignore rules, pause/resume controls, and configurable backfill windows.
 
+### Watched-Document Selection and Resolution Contract
+
+Document selection should be explicit, deterministic, and operator-visible.
+
+Allowed selection modes:
+
+1. `explicit_link`: user provides a full document link.
+2. `explicit_id`: user provides a stable document token or ID directly.
+3. `name_search`: user provides a document name or query that is resolved through controlled search.
+
+Resolution rules:
+
+1. `explicit_link` must be normalized by extracting the canonical doc token from the link and validating access through `lark-cli`.
+2. `explicit_id` must validate that the token exists, is accessible, and maps to a supported document type before activation.
+3. `name_search` must call `lark-cli docs +search` and resolve to concrete candidate document tokens before any watched-source write.
+4. Search and link resolution should always materialize to the same canonical watched-source identity keyed by stable document token, not by mutable display name.
+
+Ambiguity and drift handling:
+
+1. Zero search matches should create an explicit unresolved result with operator-facing reason, not a silent no-op.
+2. Multiple matches should remain pending and require explicit operator choice; automatic best-guess selection is out of scope for v1.
+3. If a previously selected document is renamed, the watched source should remain bound to the same stable token while display metadata updates.
+4. If access is later lost or token resolution fails, the source should move to a blocked or paused state with a visible blocker reason rather than being silently dropped.
+
+Canonical watched-source materialization:
+
+1. Resolved document sources should be persisted as explicit allowlist entries with:
+   - stable `source_id` keyed by document token
+   - `selection_mode` and original selection reference
+   - resolved display metadata and last-resolution timestamp
+   - resolution status such as `active`, `pending_resolution`, or `blocked`
+2. Downstream document, comment, and reply ingestion should only run for sources in an active resolved state.
+3. Operator-facing status commands should distinguish configured-but-unresolved document selections from active watched documents.
+
 ### Content Characteristics
 
 1. Source content may be English, Chinese, or mixed-language.
@@ -110,6 +144,38 @@ The following defaults should be treated as implementation decisions for v1 unle
 7. Automation must preserve user-authored content and only update machine-owned blocks.
 8. SQLite raw capture remains the durable system of record for replay, reconciliation, and reclassification.
 9. `raw/` contains vault-visible raw notes or context artifacts derived from that raw store; "raw first" refers to vault rendering order, not to bypassing the database-backed raw capture layer.
+
+### Live Raw-First Rendering Contract (Chat and Document)
+
+Live sync must materialize the same raw-first vault contract as replay: every new or revised upstream item that is accepted into the pipeline appears first as durable SQLite raw history, then as a vault-visible `raw/` artifact when rendering runs, never the other way around.
+
+Relationship to the canonical store:
+
+1. Immutable raw rows in SQLite remain authoritative for replay, audit, and reclassification; `raw/` Markdown is a derived, machine-owned projection of that history plus normalized metadata.
+2. Rendering must not mint parallel "shadow" raw content that only exists in the vault; if a note path is created, there must be a binding from note path back to `raw_record_id` or `ingest_key` in the local model.
+3. Skipping vault projection (for example under caps) is allowed only when stage state records explicit deferral; the operator must still be able to see deferred backlog via CLI or health output, not silent absence.
+
+Placement and naming:
+
+1. Default path pattern is `raw/lark/<source_type>/<stable_stream_or_doc_token>/<source_item_key>.md` or an equivalent single-file layout documented in implementation, but every layout must guarantee one canonical note path per logical `source_item_key` so rerenders update in place.
+2. Chat-derived artifacts should prefer thread- or stream-scoped filenames that remain stable across message edits; document-derived artifacts should key on document token plus anchor-scoped comment or reply identity when IDs are not globally unique.
+3. Large document bodies may use a summary or excerpt note in `raw/` plus pointer to stored payload in SQLite rather than duplicating megabytes in Markdown, but the excerpt note still counts as the vault-visible raw artifact and must carry full provenance links.
+
+Surface-specific expectations:
+
+1. **Chat (DM and group):** raw notes carry message-level identity, canonical deep link, author, timestamps, intake path, and a short normalized excerpt; reply threads should nest or cross-link by stable parent keys without creating a second file per transient render pass.
+2. **Document, comment, reply:** raw notes distinguish `record_type` in frontmatter, include document token, comment or reply ID, revision when available, and lifecycle state; edits create superseding vault projections aligned with new raw rows, not in-place edits that erase prior captured text without a tombstone or supersession trail in the store.
+
+Metadata and backlinks:
+
+1. Raw artifacts use the vault metadata contract (`type`, `created`, `updated`, `tags`, `source`, `author`, `published`) plus machine fields such as `ingest_key`, `source_stream_id`, and `canonical_link` where helpful for operators.
+2. Each raw note should wikilink to any already-known related daily stub or person page only when confidence is sufficient; mandatory backlinks go to upstream Lark URLs and to sibling raw context for the same thread or document.
+3. Daily and downstream notes that consume a raw item should backlink to the canonical raw path so navigation stays two-way after promotion.
+
+Dedup and rerender:
+
+1. Idempotent rerender replaces machine-owned body or section of the same path for the same `ingest_key`; it must not create `raw/...copy.md` variants on retry.
+2. When normalized content is unchanged and policy version unchanged, content-hash skip may suppress vault rewrite but must not remove existing paths or break bindings.
 
 ### User Interface Environment
 
@@ -222,6 +288,43 @@ The first implementation should ship a coherent slice rather than try to complet
 4. The initial implementation should favor a minimal end-to-end loop over broad surface-area completeness.
 5. The current `automation/lark_worker/` MVP may inform naming or operational lessons, but it is not the target architecture.
 
+### Migration Boundary and Rollout Gates
+
+The repo needs one durable decision record for how the in-tree implementation relates to the older external worker. The default boundary should be:
+
+1. Port in-tree:
+   - source governance and watched-source state
+   - canonical intake ledger, raw capture, replay, and reconciliation logic
+   - classifier, task, render, feedback, runtime, and operator CLI behavior that define the trusted local workflow
+2. Adapt or redesign in-tree:
+   - transport-specific Lark access paths where the MVP proved feasibility but not the right long-term shape
+   - event versus polling coordination, batching, checkpointing, and repair semantics
+   - operator-facing status, diagnostics, and scope messaging
+3. Replace rather than port verbatim:
+   - any worker behavior that bypasses the canonical SQLite ledger, hides provenance, or assumes side-effect ordering that conflicts with this plan
+   - any automation that writes outside the machine-owned trust boundary without explicit safety controls
+4. Keep reference-only:
+   - naming ideas, fixture examples, auth lessons, and retrieval experiments from `automation/lark_worker/`
+   - source-surface feasibility hints that still need confirmation in the in-repo architecture
+
+Honest rollout gates should be:
+
+1. Gate A: self-contained offline baseline
+   - The repo can replay checked-in raw fixtures, classify, render, import feedback, and reconcile local state without any external worker package.
+   - This gate is the minimum claim for a reliable self-contained checkout.
+2. Gate B: chat-first self-contained live slice
+   - The repo can watch governed chat sources directly in-tree, persist canonical intake state, and run through the same task and render pipeline without `automation/lark_worker`.
+   - This gate is enough to claim self-contained live support for the validated chat slice only, not full source-class parity.
+3. Gate C: broader source-class parity
+   - Documents, comments, replies, capability diagnostics, and operator-facing blockers are implemented honestly enough that the remaining gaps are narrow rather than structural.
+   - Only this gate justifies language that implies broad live-source coverage beyond chat-first scope.
+
+Operator-facing messaging should follow the same boundary:
+
+1. Do not describe the repo as self-contained for live sync while `sync-once`, `sync-daemon`, or `backfill` still require `automation/lark_worker`.
+2. Do describe the current repo as self-contained for offline replay, storage, rendering, feedback import, and the design work that defines the in-repo target architecture.
+3. When a source class is not yet in the current gate, report it as unsupported or blocked rather than implying silent partial support.
+
 ### Main Workstreams
 
 1. source governance and intake
@@ -250,8 +353,10 @@ The first implementation should ship a coherent slice rather than try to complet
 ### 1. Add or Update a Watched Source
 
 1. The user selects a DM, group, or document by direct link, ID, or approved search rule.
-2. The source is stored in versioned governance config with backfill bounds, pause state, and optional ignore or redaction rules.
-3. The system validates access through `lark-cli` before the source becomes active.
+2. For document sources, the system resolves the selection into a canonical document token and records the selection mode plus original reference.
+3. Ambiguous or unresolved document selections remain pending with an explicit operator-visible reason instead of silently selecting a best guess.
+4. The source is stored in versioned governance config with backfill bounds, pause state, and optional ignore or redaction rules.
+5. The system validates access through `lark-cli` before the source becomes active.
 
 ### 2. Initial Backfill
 
@@ -263,8 +368,9 @@ The first implementation should ship a coherent slice rather than try to complet
 ### 3. Incremental Sync
 
 1. Polling and event-driven updates both enter the same intake ledger.
-2. Per-source cursors advance only after downstream state for the batch is durable.
+2. Per-source cursors advance only after the batch's raw capture, ledger update, and durable handoff into downstream stage state are committed.
 3. Content-hash skip prevents redundant downstream work when the effective content did not change.
+4. Poll and event sightings of the same canonical source item must converge on one ledger state rather than becoming parallel downstream queues.
 
 ### 4. Task Review and Promotion
 
@@ -281,9 +387,10 @@ The first implementation should ship a coherent slice rather than try to complet
 
 ### 6. Replay and Reclassification
 
-1. The user can rerun classification and rendering from stored raw records.
-2. Replay does not mutate raw history.
-3. Reclassification updates machine-owned note blocks and task state idempotently.
+1. The user can rerun classification, rendering, and repair flows from stored raw records plus ledger state.
+2. Replay does not mutate raw history and should rebuild downstream artifacts from the earliest requested or invalidated stage.
+3. Reclassification reuses stored raw records, reruns later policy-sensitive stages, and updates machine-owned note blocks and task state idempotently.
+4. Reconcile compares raw history, ledger state, derived artifacts, and checkpoints to repair drift without inventing new canonical identities or silently discarding provenance.
 
 ## System
 
@@ -319,6 +426,69 @@ The system shall:
 4. Per-run and per-source caps should prevent accidental flood ingestion.
 5. Governance configuration should be versioned so later behavior changes can be traced back to the governing rules that produced them.
 
+### Search-Rule Watched Sources and Result Stability
+
+Search-rule watched sources are **first-class governed sources**, not ad hoc discovery shortcuts. Each rule is versioned configuration that resolves to **concrete source identities** before ingestion runs.
+
+Identity and persistence:
+
+1. A search rule stores a stable `source_id` for the rule itself plus the **last materialized match set** (document tokens, chat IDs, or other allowed surface IDs) and a **materialization timestamp**.
+2. Resolution runs through the same **allowlist-first** posture as other sources: the rule defines an explicit predicate; the system never expands into arbitrary tenant-wide scraping.
+
+Drift and ambiguity:
+
+1. **Zero matches** or **ambiguous multi-match** states follow the same operator-visible semantics as document `name_search`: unresolved or pending choice, never silent best-guess ingestion.
+2. When a new poll or manual **re-resolve** changes the match set, the runtime records **diff metadata** (added sources, removed sources, unchanged) in governance history and surfaces **result drift** in status output so operators can see that the effective watch set changed.
+3. Removed IDs stop receiving new intake but **retain historical raw and ledger rows** under normal retention policy; re-added IDs resume without minting alternate identities.
+
+Replay and caps:
+
+1. Search-rule expansion obeys the same **per-run and per-source caps** as explicit sources; cap hits split work across runs with explicit deferral rather than truncating match lists silently.
+2. Replay scoped to a search rule replays against **stored resolution snapshots** plus upstream re-fetch only when the operator requests a fresh resolve.
+
+### Governance and Policy Versioning for Live Explainability
+
+Live and replay must answer **which rules produced this row** without guessing from timestamps alone.
+
+Version identifiers:
+
+1. **Watched-source governance** carries a monotonic or content-addressed **`governance_version`** (or equivalent) that bumps when allowlists, caps, ignore rules, redaction, pause state, or search-rule predicates change materially.
+2. **Classifier, distillation, rendering, and budget policies** share a **`policy_version`** (or a small set of named versions such as `classifier@3`, `render@2`) stored in configuration artifacts under version control when possible.
+
+Attachment rules:
+
+1. **Intake ledger rows**, **immutable raw records**, **task registry rows**, **note bindings**, and **run history** all persist the **`policy_version` and `governance_version`** (or a combined effective tuple) that last successfully completed each stage for that entity.
+2. **Derived Markdown** is not the primary version carrier, but machine-owned headers or sidecar metadata may echo the versions for human inspection.
+
+Replay and reclassification:
+
+1. When **`governance_version`** changes, only stages whose semantics depend on governance must invalidate (for example eligibility, caps, redaction); pure transport facts may not.
+2. When **`policy_version`** changes, downstream stages that consume those rules must invalidate per the existing replay contract even if normalized text is unchanged.
+3. **Replay** must never silently rewrite history under a new version; it recomputes forward while preserving immutable raw rows and explicit supersession.
+
+Operator visibility:
+
+1. **Doctor, inspect, and reconcile** output should be able to show **effective versions** for the last run and for a sampled task or ledger row so operators can correlate surprising output with a config change.
+
+### Ingestion Caps and Flood-Protection Contract
+
+1. The system should enforce at least two bounded intake limits:
+   - a global per-run cap across all active sources
+   - a per-source cap within the same run
+2. Cap checks should run before expensive downstream stages and should never rely on implicit truncation by upstream pagination alone.
+3. Hitting a cap should not silently drop work; it should create explicit deferred backlog state tied to source, run, and cursor position.
+4. Deferred backlog should remain replay-safe: the next run must continue from durable cursor/ledger state without minting alternate source identities.
+5. Backfill runs may use different cap values than incremental runs, but both must produce explicit operator-visible cap-hit diagnostics.
+6. Retry behavior should respect the same cap policy so retry storms cannot bypass intake limits.
+7. Coalescing and batching may reduce downstream load after intake, but they are not a substitute for explicit intake caps at governance boundaries.
+8. When caps are exceeded repeatedly for a source, runtime health output should surface that source as lagging or throttled rather than merely showing generic queue growth.
+9. Cap policy changes must be versioned and reflected in run diagnostics so operators can explain why intake volume changed between runs.
+10. Operator-facing status output should include at least:
+    - cap values in effect
+    - per-source cap-hit counts
+    - deferred-item estimates or next-drain signals
+    - whether truncation occurred in the last run
+
 ### Metadata to Preserve
 
 For traceability and replay, the system shall preserve at least:
@@ -342,14 +512,43 @@ For traceability and replay, the system shall preserve at least:
 
 ### Ingestion Contract
 
-1. Each incoming record should map to a canonical ingest key derived from source stream, stable external ID, and revision or update marker.
-2. Polling and event-driven sources should feed a shared intake ledger instead of independent pipelines.
-3. The intake ledger should record first-seen time, last-seen time, latest revision seen, processing state, and downstream stage completion.
-4. Cursors should be tracked per source stream rather than globally.
-5. The system should assume at-least-once delivery from upstream and make downstream stages idempotent.
-6. Incremental sync should process only new or changed records since the stored cursor or revision.
-7. Replay mode should be able to rebuild derived artifacts from raw capture without mutating raw history.
-8. Reclassification mode should allow rules or model-policy changes to rerun on stored raw records without double-writing notes.
+1. Each observed source item should first map to a stable `source_item_key` derived from source stream, record type, and stable external ID; when an external ID is only unique within a parent anchor, thread, or document-local namespace, that parent anchor must be part of the canonical identity.
+2. Each material upstream change should then map to a `revision_key` derived from the `source_item_key` plus a revision, edit, delete, or supersession marker; if upstream does not expose a revision ID, the fallback should be deterministic and based on content hash plus trustworthy upstream update metadata.
+3. The canonical `ingest_key` used for immutable raw capture should identify one revision-bearing record, not one observation event.
+4. Polling and event-driven sources should feed a shared intake ledger instead of independent pipelines, and repeated sightings of the same `ingest_key` should update one ledger row rather than create duplicate raw or derived artifacts.
+5. The intake ledger should record at least first-seen time, last-seen time, latest revision seen, lifecycle state, first and last intake path, observation counters, retry or error state, and downstream stage completion.
+6. Downstream stage completion should be explicit rather than implicit. The durable state should be able to answer whether raw capture, distillation, task upsert, and note rendering have already run for a given canonical revision and under which policy or rules version.
+7. Lifecycle transitions such as `active` -> `edited`, `active` -> `deleted`, or `edited` -> `superseded` must not mint a new `source_item_key`; they should produce a new `revision_key` or lifecycle-bearing revision for the same canonical source item unless the upstream system has actually created a distinct new item.
+8. Cursors should be tracked per source stream rather than globally and may contain both a monotonic ordering cursor and an opaque upstream paging token when the source surface requires both.
+9. Cursor advancement should happen only after the raw capture and stage-handoff state for the batch are durable enough that replay can resume without re-fetch-dependent guesswork.
+10. The system should assume at-least-once delivery from upstream and make downstream stages idempotent.
+11. Incremental sync should process only new or changed records since the stored cursor or revision, while content-hash skip should suppress downstream reruns only when canonical content and lifecycle state are unchanged.
+12. Replay mode should be able to rebuild derived artifacts from raw capture plus stored stage state without mutating raw history or minting new canonical identities.
+13. Reclassification mode should allow rules or model-policy changes to rerun on stored raw records by updating later-stage state idempotently instead of reinserting raw rows or double-writing notes.
+
+### Dedup and Stage-Completion Contract
+
+1. An exact `ingest_key` match means "same canonical revision seen again" and should update observation metadata, counters, and coalescing state only; it must not append a second raw row or enqueue a second independent downstream job.
+2. A stable `source_item_key` with a new `revision_key` means "same logical item, new revision" and should append a new immutable raw record, advance current-item state, and invalidate only the downstream stages whose inputs actually changed.
+3. Content-hash skip should apply only after raw capture and ledger state are durable. It is a rule for suppressing redundant downstream work, not for skipping raw-history preservation.
+4. Downstream stages may be treated as already satisfied only when the canonical content hash, lifecycle state, and relevant policy version for that stage are unchanged for the revision being processed.
+5. A policy or rules-version change should invalidate the affected later stages even when the raw payload and normalized text are unchanged.
+6. A lifecycle transition such as delete, undelete, or supersession should invalidate any later stage whose output depends on visibility or current-state semantics, even if the human-visible text is unchanged.
+7. Poll and event observations that disagree only in arrival path, timing, or duplicated payload delivery should converge on one ledger row and one stage-state lineage rather than racing to produce duplicate task or render side effects.
+8. Coalescing may delay downstream processing for bursty edits or reply storms, but the final coalesced batch must still preserve revision provenance and must not erase the fact that multiple observations occurred.
+9. Stage completion should be tracked per stage boundary so recovery can rerun only the first incomplete or invalidated stage instead of restarting the whole pipeline by default.
+10. The plan should prefer "resume from the earliest affected stage" over "rerun everything" whenever provenance, policy version, and stage-state data are sufficient to do so safely.
+
+### Replay, Reclassification, and Reconcile Contract
+
+1. Replay should read immutable raw history plus ledger and checkpoint state, then deterministically rebuild derived stages without minting new raw rows for already-captured revisions.
+2. Replay may be scoped by source, time window, source item, or revision range, but every scoped replay must still preserve the same canonical identity and stage-order rules as normal live intake.
+3. Reclassification should start from stored raw records and rerun only the stages whose behavior depends on rules, prompts, thresholds, or model-policy changes; it should not rewrite raw history or reset unrelated successful stages.
+4. Reconcile should detect drift such as missing current-state materializations, missing rendered blocks, stale checkpoints, or stage-state gaps, then repair them by resuming from the earliest missing or invalid stage rather than fabricating alternate identities.
+5. Reconcile must be able to explain every repair in terms of existing provenance: which raw revision was authoritative, which stage was missing or stale, and which policy version justified the rerun.
+6. None of replay, reclassification, or reconcile should advance source-stream checkpoints past unseen upstream data; their job is to repair or recompute local derived state against already-captured history unless the operator explicitly runs a new sync or backfill.
+7. A failed replay, reclassification, or reconcile run must leave enough durable stage-state and runtime diagnostics behind that the next run can resume safely instead of guessing which downstream effects already happened.
+8. If drift cannot be resolved deterministically, the system should quarantine the affected item or stage and surface it for review rather than silently mutating notes or tasks under uncertainty.
 
 ### Task-Generation Policy
 
@@ -382,6 +581,63 @@ For traceability and replay, the system shall preserve at least:
 7. User-authored narrative outside machine-owned sections must be preserved.
 8. Generated notes should add backlinks and wikilinks to related source, people, project, and area notes when confidence is sufficient.
 
+### Live Durable-Note Boundary (People, Projects, and Area)
+
+Live sync must treat broader vault curation as out of bounds for automatic writers until the core machine-owned surfaces (`raw/`, `daily/`, `area/current tasks/index.md`) are proven stable under replay, caps, and rerender stress.
+
+Default posture:
+
+1. **No automatic writes** in v1 to `people/*/index.md`, `projects/*/index.md`, or `area/<topic>/index.md` except where an explicit future opt-in flag names the target path and section contract; implied or heuristic promotion into those trees is forbidden.
+2. **Link-only assistance** is allowed: generated raw or daily content may wikilink to existing people, project, or area pages when the link target already exists and the classifier confidence meets a documented threshold; creating new durable entity pages from live sync remains off unless opt-in.
+3. **Current Tasks is not a substitute** for people or project pages: durable org and project context still rolls up through human curation or later opt-in automation, not through silent duplication of task bullets into stakeholder notes.
+
+Operator messaging:
+
+1. CLI, doctor, and migration docs should state clearly that live mode owns `raw/`, daily managed sections, and Current Tasks machine blocks only.
+2. When a heuristic might suggest a durable-page update (for example detecting a project name), the system should surface that as a review hint or `needs_review` note in daily or raw context, not perform the write.
+3. Opt-in durable automation, when introduced, must use the same machine-owned block pattern, stable IDs, and binding metadata as core surfaces so it cannot expand scope without a configuration change.
+
+### Live Daily-Note Insertion Contract
+
+Live-created tasks and review candidates always land in **`daily/YYYY-MM-DD.md`** before any Current Tasks write. The date is derived from a documented, deterministic rule (for example **source event timestamp in the operator-local timezone**, or **capture time** when the upstream event has no trustworthy clock) recorded on the task and in run diagnostics so replay picks the same path.
+
+Managed sections:
+
+1. **Open tasks and high-confidence candidates** live in a machine-owned section such as `daily:<YYYY-MM-DD>:auto-open-tasks`, using per-task block IDs as in the machine-owned block pattern. Only these sections are eligible for automatic list-item replacement.
+2. **`needs_review` and low-confidence candidates** live in a separate section such as `daily:<YYYY-MM-DD>:review-lane` so reviewers can scan uncertainty without mixing it into default open-work lists. That section is still machine-owned and rerender-safe.
+3. Sections must be **created idempotently**: if the daily file does not exist, the writer creates it with required frontmatter for a daily note; if it exists, the writer appends or refreshes only the managed sections.
+
+Incremental behavior:
+
+1. A **repeated sighting** or **revision** of the same `task_id` updates the existing block inside the daily section (same stable block ID), attaching newer excerpts or links as evidence rather than duplicating bullets.
+2. A **lifecycle change** (for example dismissed in feedback, completed manually) stops automatic updates to that block; later raw evidence may still append to raw notes but does not resurrect the daily machine block unless policy explicitly reopens it.
+3. **User-authored body text** outside `<!-- lark-to-notes:section ... -->` markers is never modified by the renderer; if the daily note has no machine section yet, the writer inserts sections without reordering unrelated headings the user placed above or below.
+
+### Live Current Tasks Promotion Contract
+
+Promotion from daily to **`area/current tasks/index.md`** is **deliberate and gated**, not an automatic mirror of every daily bullet.
+
+Promotion triggers (any one may apply; all require stable `task_id` and non-`needs_review` disposition unless overridden by explicit operator action):
+
+1. Classifier **promotion recommendation** of `current-tasks` **and** task state not in `needs_review`, **or**
+2. **Structured feedback** `confirm` / equivalent that marks the item as durable open work, **or**
+3. **Explicit operator CLI** promotion for a listed `task_id`.
+
+Non-promotion:
+
+1. Items whose latest disposition is **`needs_review`**, **snoozed**, or **dismissed** must not appear in Current Tasks unless a later confirm or override clears that state.
+2. **Daily-only** recommendations never promote automatically.
+
+Merge and shape:
+
+1. Current Tasks uses **one machine-owned section** (for example `current-tasks:auto`) with **per-task block IDs** mirroring the daily pattern. If the same `task_id` is promoted from multiple days, the renderer keeps **one** open entry and merges provenance links.
+2. **Fingerprints** that strongly match an existing promoted `task_id` update that block instead of adding a second bullet.
+
+Backlinks and persistence:
+
+1. Each Current Tasks block retains a **wikilink or path reference** to the **canonical raw note** and the **daily section** where the item was last surfaced, plus the Lark deep link stored in metadata.
+2. Promoted items remain in Current Tasks until **manual completion**, **merge**, **dismiss** via feedback import, or **supersession** by a later task record; the system does not auto-remove items solely because the daily section was archived or rotated—reconciliation may refresh wording but respects explicit lifecycle state.
+
 ### Machine-Owned Block Pattern
 
 Generated note sections should use an explicit managed section per note plus stable per-item block IDs inside that section so rerenders can replace only the intended content. A suitable v1 pattern is:
@@ -398,6 +654,25 @@ Generated note sections should use an explicit managed section per note plus sta
 ```
 
 This pattern keeps updates predictable, allows stable item-level replacement inside a bounded section, and protects nearby user-authored content.
+
+### Live Rerender Safety for Machine-Owned Blocks
+
+Live rerenders are higher risk than batch replay because humans may edit the same file between arrivals. The writer must treat **IDs, not cursor positions**, as authoritative.
+
+Replacement rules:
+
+1. The renderer **parses only paired** `<!-- lark-to-notes:block begin id=... -->` / `... end ...` markers with **known prefixes** (`task:`, `section` ids owned by this runtime). Unrecognized or malformed pairs are **left untouched** and reported through doctor or reconcile quarantine rather than repaired heuristically in place.
+2. Updates **replace inner Markdown** between begin/end for a **single declared ID** atomically in one file write. Partial writes, duplicated begin markers without matching ends, or ambiguous nesting must **fail the render stage** for that note without truncating the file.
+3. When upstream evidence **removes** a task, the default behavior is to **remove the managed block pair** for that `task_id` while leaving all other blocks and all non-managed text unchanged; optional **tombstone one-liners** inside the same section are a policy choice but must not resurrect deleted IDs silently.
+
+User-authored boundaries:
+
+1. Text **outside** all managed `section` spans is **never** auto-edited, including headings the user inserted inside a file that also contains machine sections.
+2. If the user **reorders** machine blocks within a section, the next rerender should still locate blocks **by ID** and may normalize ordering back to canonical sort **only** when an explicit `normalize_block_order` policy is enabled; default is **preserve user order** inside the section to reduce surprise.
+
+Concurrency:
+
+1. The **single-writer lock** applies across live and replay paths. A rerender reads the latest file snapshot, applies deterministic transforms, and writes once; conflicts with simultaneous human saves are detected via hash or mtime precondition and surfaced as **blocked render** rather than blind overwrite.
 
 ### LLM Usage Requirements
 
@@ -508,6 +783,16 @@ Normalized records should include at least:
 11. `participants`
 12. `content_hash`
 13. `raw_payload_pointer`
+14. `source_item_key`
+15. `revision_key`
+16. `ingest_key`
+17. `intake_path`
+18. `observed_at`
+19. `stage_state`
+
+`stage_state` should be a durable description of which downstream stages have run for the current canonical revision and whether they succeeded, failed, or still need replay. This must stay separate from immutable raw history so partial failures do not force raw mutation.
+
+`source_item_key` should stay stable across lifecycle transitions for the same logical item, while `revision_key` captures the specific edited, deleted, or superseded version being processed. For reply-like or anchor-scoped records, `parent_item_id` is part of that canonical identity whenever the upstream ID is not globally unique on its own.
 
 ### 4. Raw Capture Layer
 
@@ -522,6 +807,8 @@ Principles:
 5. edits should create superseding raw revisions rather than mutate prior raw history
 6. deletes should create tombstone records rather than silently disappear
 7. malformed or unparseable payloads should be quarantined for inspection instead of blocking the full pipeline
+8. repeated poll or event observations of the same canonical revision should update ledger metadata rather than create a second immutable raw record
+9. stage-state persistence must be sufficient to resume distillation, task upsert, or rendering after a crash without requiring ambiguous refetches
 
 Purposes:
 
@@ -613,6 +900,34 @@ Artifact rules:
 
 If a future dedicated frontend is built, it should borrow useful ideas from the plannotator workflow.
 
+### Live-Created Candidates and the Plannotator Feedback Loop
+
+Live intake must not bypass the same structured review and feedback import path used for replay-generated work. The only differences should be provenance labels and timing, not artifact shape or downstream semantics.
+
+What enters review:
+
+1. Any task or candidate emitted with `needs_review`, low confidence, or a classifier reason that implies human triage should appear in the same Markdown review surfaces as replay outputs: primarily the relevant `daily/` lane and any linked `raw/` context the renderer attached.
+2. High-confidence promotions to `daily-only` or `current-tasks` may skip plannotator in the moment, but the operator can still open structured feedback against those stable task IDs later; the sidecar format must accept feedback for any rendered stable ID.
+3. Live-created uncertain items should never be "CLI-only" or "DB-only" triage in v1: if they are worth surfacing, they must be visible in vault Markdown (or explicitly marked deferred with a backlog reason), then reviewable through plannotator on the same artifacts.
+
+Structured triage and round-trip:
+
+1. Structured actions (confirm, dismiss, wrong class, missed task, snooze, merge, optional comment) apply identically whether the underlying evidence arrived from live workers or from replay.
+2. `lark-to-notes feedback import` treats live and replay origins the same: it keys on stable task and source identifiers in the YAML sidecar, not on run mode.
+3. `lark-to-notes feedback draft --out <path>` lists review-lane task IDs in a YAML sidecar with placeholder actions so the operator can start from the live registry, edit directives in plannotator or any editor, then import; the draft is intentionally invalid until each `action` is replaced.
+4. Import updates the task registry and any bound note metadata, then schedules or completes reconciliation the same way for both paths.
+
+Effect on tuning and policy:
+
+1. Feedback signals from live-created candidates feed the same tuning inputs (pattern weights, thresholds, routing, cap policy hints) as replay-derived feedback; provenance should record `origin=live|replay` for analytics, not for different merge rules.
+2. Policy or governance revisions prompted by repeated live-only failure modes (for example systematic wrong-class on a source) should still be expressed as durable config or watched-source changes, not ad hoc one-off overrides hidden outside the feedback pipeline.
+
+Operator expectations:
+
+1. Reviewing a live-created candidate should feel the same as reviewing a replay item: same sidecar shape, same commands, same stable IDs in Markdown.
+2. When live sync is ahead of vault render, the operator may see backlog in health or doctor output; that is a delivery lag signal, not a separate feedback channel.
+3. Operators should expect higher churn in the `needs_review` lane under noisy live sources; caps and flood protection reduce volume but do not change how reviewed items are corrected through plannotator.
+
 ### 9. Note Rendering Layer
 
 The system should write automatically into the notes vault.
@@ -651,6 +966,22 @@ Operational behavior should include:
 7. periodic reconciliation that compares stored cursors against source state and refetches gaps
 8. auth-expiry and credential-recovery guidance
 
+### Live Serialized Note Writer and Locking Contract
+
+Live mode amplifies concurrency pressure because **poll**, **event**, **replay**, **reclassify**, and **reconcile** can all attempt note mutations in the same wall-clock window. The contract is still **exactly one serialized writer** for vault files.
+
+Queue and lock model:
+
+1. All vault mutations (raw, daily, Current Tasks, and any future opt-in durable pages) pass through a **single writer queue** with a durable **runtime lock** (for example SQLite advisory lock, filesystem lock file under `var/`, or equivalent) held for the duration of **read–merge–write** for each target path.
+2. **Intake and ledger writers** may proceed in parallel only where they do not touch Markdown; the moment a stage needs to read or write a vault path, it **enqueues a writer job** rather than opening the file directly from arbitrary worker threads.
+3. **Lock acquisition** uses a bounded timeout. On timeout, the job **fails without partial writes**, emits a structured diagnostic (`writer_lock_contended`, target path, holder hint), and leaves stage state dirty for retry—never a torn file.
+
+Interaction of paths:
+
+1. **Replay and live** must share the same queue ordering rules (generally FIFO per vault root with optional priority for operator-initiated commands over background sync).
+2. **Reconcile repair** enqueues like any other writer; it does not bypass the lock.
+3. If a human editor holds an external Obsidian lock the runtime cannot see, **mtime or content-hash preconditions** on writer commits still detect unexpected concurrent edits and abort with the same contended-writer diagnostic.
+
 ### 11. Performance and Cost-Control Layer
 
 The project should explicitly control LLM spend and end-to-end throughput.
@@ -668,6 +999,44 @@ Key controls:
 9. max tokens and max items per batch
 10. budget caps per run and per day
 11. graceful degradation into heuristics-only mode when budgets or provider limits are hit
+
+### Live LLM Budget, Provider Routing, and Heuristics-Only Fallback
+
+Live runs should treat LLM spend as a **metered resource** with the same observability as batch replay, but with **stricter pre-flight checks** because incremental work can silently accumulate calls.
+
+Stages and eligibility:
+
+1. **Intake, ledger, raw capture, and note rendering** must not call models in v1. **Selective distillation or reclassification** stages may call models only when policy marks an item as **LLM-eligible** (uncertainty, long context, multilingual disambiguation) and the item has not already consumed its per-task call budget.
+2. Each eligible call passes through a **router** that chooses the active provider configuration; v1 uses **one active provider policy at a time** without blending.
+
+Accounting and caps:
+
+1. Every live run records **call count, token estimates, wall time, cache hits, fallbacks, and budget headroom** into run history and surfaces summarized totals in **doctor** output.
+2. **Per-run and per-day caps** short-circuit remaining LLM-eligible work: items past the cap stay in **heuristics-only** outcomes (`needs_review`, degraded summary, or omitted optional summarization) with explicit **skip reasons** attached to tasks or run diagnostics—not silent truncation.
+
+Fallback behavior:
+
+1. When the provider returns **auth, quota, or hard errors**, the runtime switches that batch to **heuristics-only** for the remainder of the run and sets a **sticky degraded flag** visible to the operator until cleared.
+2. **Heuristics-only mode** must still preserve **provenance and task visibility**; it must not promote extra aggression into Current Tasks to “compensate” for missing models.
+
+### Live Throughput, Backpressure, Coalescing, and Load Shedding
+
+Throughput controls complement **governance caps** (see ingestion caps): caps bound accepted volume; backpressure bounds how much accepted work is **actively processed** when downstream stages lag.
+
+Chunking and batching:
+
+1. **Large documents and long threads** use deterministic **chunking** with stable chunk IDs so cache entries, ledger references, and rerenders line up across retries.
+2. **Coalescing windows** collapse bursty edits or reply storms into a single downstream batch per stream while still appending **immutable raw history** per revision rules; coalescing delays work but does not drop revisions.
+
+Caching:
+
+1. **Model-result and normalized-text caches** are keyed by `(ingest_key or content_hash, policy_version, provider_route)` so replay and live share invalidation semantics.
+
+Backpressure and shedding:
+
+1. Each stage exposes **queue depth and age metrics**. When depth crosses thresholds, the runtime applies **ordered shedding**: first defer optional rerenders or cosmetic refreshes, then defer non-urgent distillation extras, and only under extreme pressure defer intake processing—preferring to **honor caps and explicit deferral** over silent loss.
+2. Shedding decisions are **operator-visible** in health output and tied to **per-source** backlog signals so noisy chats cannot starve quiet sources without showing up in metrics.
+3. **Retries** honor the same cap and backpressure policy so retry storms cannot bypass limits.
 
 ## Canonical Local Data Model
 
@@ -689,6 +1058,15 @@ Suggested fields:
 8. `ignore_rules`
 9. `redaction_policy`
 10. `governance_version`
+11. `run_cap`
+12. `source_cap`
+13. `cap_policy`
+14. `last_cap_hit_at`
+
+Field notes:
+
+1. `selection_mode` should preserve whether the source came from direct link, explicit token, or name search.
+2. `source_ref` should preserve the original operator input used for selection plus the canonical resolved identifier once available.
 
 ### 2. Intake Ledger
 
@@ -700,12 +1078,58 @@ Suggested fields:
 2. `source_id`
 3. `source_stream_id`
 4. `source_item_id`
-5. `revision_id`
-6. `intake_path`
-7. `first_seen_at`
-8. `last_seen_at`
-9. `processing_state`
-10. `last_error`
+5. `parent_item_id`
+6. `revision_id`
+7. `latest_revision_id`
+8. `lifecycle_state`
+9. `first_intake_path`
+10. `last_intake_path`
+11. `poll_seen_count`
+12. `event_seen_count`
+13. `first_seen_at`
+14. `last_seen_at`
+15. `coalesce_until`
+16. `processing_state`
+17. `raw_captured_at`
+18. `distilled_at`
+19. `task_upserted_at`
+20. `rendered_at`
+21. `stage_state`
+22. `last_error`
+23. `policy_version`
+
+Notes:
+
+1. The ledger row is the mutable operational state for one canonical revision-bearing item, not a second copy of immutable raw history.
+2. `stage_state` may be materialized either as explicit per-stage timestamp columns plus status or as a structured payload, but it must answer whether raw capture, distillation, task upsert, and rendering have already succeeded for the current canonical revision.
+3. `latest_revision_id` and `lifecycle_state` let the ledger represent the newest observed state for the logical item without rewriting prior raw records.
+4. `first_intake_path` and `last_intake_path` preserve whether an item first arrived by polling or events and whether later sightings changed that path mix.
+
+### 2b. Source Stream Checkpoints
+
+Purpose: track replay-safe progress per watched stream without conflating stream position with item-level ledger state.
+
+Suggested fields:
+
+1. `source_id`
+2. `source_stream_id`
+3. `cursor_kind`
+4. `cursor_value`
+5. `last_seen_item_id`
+6. `last_seen_revision_id`
+7. `last_seen_timestamp`
+8. `page_token`
+9. `checkpoint_state`
+10. `last_reconciled_at`
+11. `updated_at`
+12. `policy_version`
+
+Notes:
+
+1. Checkpoints are per source stream, not global, so a document comment stream, a DM stream, and a group-chat stream can advance independently.
+2. The checkpoint should move only after the corresponding batch is durable enough to replay from local state rather than requiring ambiguous re-fetch behavior.
+3. `cursor_kind` exists because some surfaces advance by timestamp, some by message or revision ID, and some by opaque server-issued paging tokens.
+4. `checkpoint_state` should distinguish at least healthy, lagging, and needs_reconcile conditions so runtime repair can act without guessing.
 
 ### 3. Raw Records
 
@@ -845,6 +1269,28 @@ Recommended commands:
 9. `lark-to-notes feedback import`
 10. `lark-to-notes reconcile`
 11. `lark-to-notes doctor`
+
+### Operator Status, Inspect, and Doctor Command Surface (Live)
+
+Operators must understand **what is watched, what is blocked, what is lagging, and what budgets or locks apply** without opening SQLite. Live sync therefore extends the CLI with explicit **read-mostly inspection** commands alongside mutating workflows.
+
+Recommended additions (names may map to subcommands or flags, but the capabilities should exist):
+
+1. **`sources status`** — per watched source: resolution state, pause, caps, last successful run, backlog or lag hints, auth or capability blockers, and last drift event for search rules.
+2. **`runtime status`** — queue depths, writer lock state, active degraded modes (for example heuristics-only), coalescing backlog, and per-stage age metrics.
+3. **`budget status`** — per day and per run: LLM headroom, calls skipped for caps, cache hit rates, and last provider error class.
+4. **`inspect ledger|task|raw <id>`** — bounded, redaction-aware dumps of canonical rows and stage timestamps for support and debugging.
+5. **`doctor --json` (or equivalent)** — machine-parseable superset including the above summaries plus migration honesty flags (which gates are satisfied, which source classes are unsupported).
+
+Human versus machine output:
+
+1. Default TTY output favors **short narratives with next actions**; `--json` favors **stable field names** for scripting and dashboards.
+2. Partial or degraded support must be **explicit** (`unsupported`, `blocked`, `degraded`) rather than folding into generic success exit codes.
+
+### Live command ergonomics
+
+1. Long-running commands support **non-interactive** mode suitable for cron and agents: clear exit codes, log-friendly stderr, and `--limit` style bounds on inspect dumps.
+2. Dangerous mutating commands continue to require **explicit flags** or **dry-run** where appropriate so inspect-first workflows remain safe.
 
 ## Rationale
 
@@ -1019,8 +1465,9 @@ Build a local test corpus that includes:
 
 ### Phase 2 Exit Criteria
 
-1. raw history is append-only and replayable
-2. identical reruns do not duplicate raw records or downstream note writes
+1. raw history is append-only and replayable across revisions, tombstones, and supersession
+2. identical reruns or mixed poll/event sightings do not duplicate raw records or downstream note writes
+3. source cursors advance only after durable raw capture plus stage handoff, and partial failures can resume from stored stage state without redefining item identity
 
 ### Phase 3 Exit Criteria
 

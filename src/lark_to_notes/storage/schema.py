@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -240,6 +240,98 @@ CREATE INDEX IF NOT EXISTS idx_content_cache_expires_at
     ON content_cache (expires_at);
 """
 
+# ---------------------------------------------------------------------------
+# Version 7 — mixed poll/event chat intake ledger
+# ---------------------------------------------------------------------------
+
+_V7_DDL = """
+CREATE TABLE IF NOT EXISTS chat_intake_ledger (
+    ingest_key        TEXT PRIMARY KEY,
+    message_id        TEXT NOT NULL,
+    source_id         TEXT NOT NULL,
+    source_type       TEXT NOT NULL,
+    chat_id           TEXT NOT NULL,
+    chat_type         TEXT NOT NULL DEFAULT '',
+    sender_id         TEXT NOT NULL DEFAULT '',
+    sender_name       TEXT NOT NULL DEFAULT '',
+    direction         TEXT NOT NULL DEFAULT 'incoming',
+    created_at        TEXT NOT NULL,
+    content           TEXT NOT NULL DEFAULT '',
+    payload_json      TEXT NOT NULL DEFAULT '{}',
+    first_seen_at     TEXT NOT NULL,
+    last_seen_at      TEXT NOT NULL,
+    first_intake_path TEXT NOT NULL CHECK(first_intake_path IN ('poll', 'event')),
+    last_intake_path  TEXT NOT NULL CHECK(last_intake_path IN ('poll', 'event')),
+    poll_seen_count   INTEGER NOT NULL DEFAULT 0,
+    event_seen_count  INTEGER NOT NULL DEFAULT 0,
+    coalesce_until    TEXT,
+    processing_state  TEXT NOT NULL DEFAULT 'pending'
+                           CHECK(processing_state IN ('pending', 'processed')),
+    processed_at      TEXT,
+    last_error        TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_intake_source_message
+    ON chat_intake_ledger (source_id, message_id);
+
+CREATE INDEX IF NOT EXISTS idx_chat_intake_processing_state
+    ON chat_intake_ledger (processing_state, coalesce_until, first_seen_at);
+"""
+
+# ---------------------------------------------------------------------------
+# Version 8 — document body, comment, and reply intake (revision-bearing)
+# ---------------------------------------------------------------------------
+#
+# Chat messages use ``chat_intake_ledger`` + ``raw_messages``.  Document
+# surfaces are first-class ``record_type`` values with their own revision
+# and lifecycle columns so comments and replies are not forced into the
+# chat-shaped ``chat_id`` / ``message_id`` model.
+
+_V8_DDL = """
+CREATE TABLE IF NOT EXISTS document_intake_ledger (
+    ingest_key         TEXT PRIMARY KEY,
+    record_type        TEXT NOT NULL CHECK(record_type IN (
+                            'doc_body', 'doc_comment', 'doc_reply'
+                        )),
+    source_id          TEXT NOT NULL
+                           REFERENCES watched_sources(source_id)
+                           ON DELETE CASCADE,
+    document_token     TEXT NOT NULL,
+    source_stream_id   TEXT NOT NULL,
+    source_item_id     TEXT NOT NULL,
+    parent_item_id     TEXT NOT NULL DEFAULT '',
+    revision_id        TEXT NOT NULL DEFAULT '',
+    lifecycle_state    TEXT NOT NULL DEFAULT 'active' CHECK(lifecycle_state IN (
+                            'active', 'edited', 'deleted', 'superseded'
+                        )),
+    content_hash       TEXT NOT NULL DEFAULT '',
+    normalized_text    TEXT NOT NULL DEFAULT '',
+    payload_json       TEXT NOT NULL DEFAULT '{}',
+    canonical_link     TEXT NOT NULL DEFAULT '',
+    first_seen_at      TEXT NOT NULL,
+    last_seen_at       TEXT NOT NULL,
+    first_intake_path  TEXT NOT NULL CHECK(first_intake_path IN ('poll', 'event')),
+    last_intake_path   TEXT NOT NULL CHECK(last_intake_path IN ('poll', 'event')),
+    poll_seen_count    INTEGER NOT NULL DEFAULT 0,
+    event_seen_count   INTEGER NOT NULL DEFAULT 0,
+    coalesce_until     TEXT,
+    processing_state   TEXT NOT NULL DEFAULT 'pending' CHECK(processing_state IN (
+                            'pending', 'processed'
+                        )),
+    processed_at       TEXT,
+    last_error         TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_intake_source_document
+    ON document_intake_ledger (source_id, document_token);
+
+CREATE INDEX IF NOT EXISTS idx_doc_intake_stream_item
+    ON document_intake_ledger (source_stream_id, source_item_id);
+
+CREATE INDEX IF NOT EXISTS idx_doc_intake_processing_state
+    ON document_intake_ledger (processing_state, coalesce_until, first_seen_at);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
@@ -247,6 +339,8 @@ _MIGRATIONS: dict[int, str] = {
     4: _V4_DDL,
     5: _V5_DDL,
     6: _V6_DDL,
+    7: _V7_DDL,
+    8: _V8_DDL,
 }
 
 

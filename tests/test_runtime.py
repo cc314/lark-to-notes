@@ -24,9 +24,18 @@ from pathlib import Path
 
 import pytest
 
+from lark_to_notes.intake.ledger import (
+    chat_ingest_key,
+    count_raw_messages,
+    get_chat_intake_item,
+    observe_chat_message,
+)
+from lark_to_notes.intake.models import ChatIntakeState, IntakePath, RawMessage
 from lark_to_notes.runtime.executor import (
+    drain_ready_chat_intake,
     execute_reconcile_run,
     execute_work_batch,
+    observe_and_drain_chat_message,
     run_background_runtime,
 )
 from lark_to_notes.runtime.lock import RuntimeLock
@@ -70,14 +79,35 @@ def conn() -> Generator[sqlite3.Connection, None, None]:
     c.close()
 
 
+def _chat_msg(
+    message_id: str = "msg-1",
+    *,
+    source_id: str = "dm:u1",
+    content: str = "hello",
+) -> RawMessage:
+    return RawMessage(
+        message_id=message_id,
+        source_id=source_id,
+        source_type="dm_user",
+        chat_id="ou_chat",
+        chat_type="p2p",
+        sender_id="ou_sender",
+        sender_name="Alice",
+        direction="incoming",
+        created_at="2026-04-14 10:00",
+        content=content,
+        payload={"content": content},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Schema v5
 # ---------------------------------------------------------------------------
 
 
 class TestSchemaV5:
-    def test_schema_version_is_6(self) -> None:
-        assert SCHEMA_VERSION == 6
+    def test_schema_version_is_8(self) -> None:
+        assert SCHEMA_VERSION == 8
 
     def test_runtime_runs_table_exists(self, conn) -> None:  # type: ignore[no-untyped-def]
         row = conn.execute(
@@ -294,6 +324,8 @@ class TestHealthReport:
         assert report.error_rate == pytest.approx(0.0)
         assert report.last_run_at is None
         assert report.lag_seconds is None
+        assert report.repeated_item_count == 0
+        assert report.duplicate_event_count == 0
 
     def test_health_counts_runs(self, conn) -> None:  # type: ignore[no-untyped-def]
         r1 = start_run(conn, "sync")
@@ -356,6 +388,25 @@ class TestHealthReport:
         )
         assert report.queue_depth == 2
         assert report.lag_seconds == pytest.approx(600.0)
+
+    def test_health_duplicate_observation_metrics(self, conn: sqlite3.Connection) -> None:
+        msg = _chat_msg("msg-health-dupe")
+        observe_chat_message(
+            conn,
+            msg,
+            intake_path=IntakePath.POLL,
+            observed_at="2026-04-14T10:00:00Z",
+        )
+        observe_chat_message(
+            conn,
+            msg,
+            intake_path=IntakePath.EVENT,
+            observed_at="2026-04-14T10:00:10Z",
+        )
+
+        report = health_report(conn)
+        assert report.repeated_item_count == 1
+        assert report.duplicate_event_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +867,150 @@ class TestRuntimeExecutor:
         assert result.queue_depth_peak == 2
         assert len(result.run_ids) == 1
         assert sleeps == [0.25]
+
+    def test_drain_ready_chat_intake_processes_event_then_poll_once(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        msg = _chat_msg("msg-event-poll")
+        observe_chat_message(
+            conn,
+            msg,
+            intake_path=IntakePath.EVENT,
+            observed_at="2026-04-14T10:00:00Z",
+            coalesce_window_seconds=120,
+        )
+        observe_chat_message(
+            conn,
+            msg,
+            intake_path=IntakePath.POLL,
+            observed_at="2026-04-14T10:00:15Z",
+        )
+
+        result = drain_ready_chat_intake(
+            conn,
+            lock_path=tmp_path / ".ltn.lock",
+            as_of="2026-04-14T10:00:15Z",
+            sleep_fn=lambda _delay: None,
+        )
+
+        item = get_chat_intake_item(conn, chat_ingest_key(msg.source_id, msg.message_id))
+        assert result.items_total == 1
+        assert result.items_processed == 1
+        assert count_raw_messages(conn) == 1
+        assert item is not None
+        assert item.processing_state is ChatIntakeState.PROCESSED
+
+    def test_drain_ready_chat_intake_processes_poll_then_event_once(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        msg = _chat_msg("msg-poll-event")
+        observe_chat_message(
+            conn,
+            msg,
+            intake_path=IntakePath.POLL,
+            observed_at="2026-04-14T10:00:00Z",
+        )
+        observe_chat_message(
+            conn,
+            msg,
+            intake_path=IntakePath.EVENT,
+            observed_at="2026-04-14T10:00:20Z",
+            coalesce_window_seconds=120,
+        )
+
+        result = drain_ready_chat_intake(
+            conn,
+            lock_path=tmp_path / ".ltn.lock",
+            as_of="2026-04-14T10:00:20Z",
+            sleep_fn=lambda _delay: None,
+        )
+
+        assert result.items_total == 1
+        assert result.items_processed == 1
+        assert count_raw_messages(conn) == 1
+
+    def test_drain_ready_chat_intake_is_retry_safe(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        msg = _chat_msg("msg-retry-safe")
+        observe_chat_message(
+            conn,
+            msg,
+            intake_path=IntakePath.POLL,
+            observed_at="2026-04-14T10:00:00Z",
+        )
+
+        first = drain_ready_chat_intake(
+            conn,
+            lock_path=tmp_path / ".ltn.lock",
+            as_of="2026-04-14T10:00:00Z",
+            sleep_fn=lambda _delay: None,
+        )
+        second = drain_ready_chat_intake(
+            conn,
+            lock_path=tmp_path / ".ltn.lock",
+            as_of="2026-04-14T10:00:10Z",
+            sleep_fn=lambda _delay: None,
+        )
+
+        assert first.items_total == 1
+        assert second.items_total == 0
+        assert count_raw_messages(conn) == 1
+
+    def test_observe_and_drain_chat_message_processes_poll_immediately(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        observed, drained = observe_and_drain_chat_message(
+            conn,
+            message=_chat_msg("msg-bridge-poll"),
+            intake_path=IntakePath.POLL,
+            observed_at="2026-04-14T10:00:00Z",
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _delay: None,
+        )
+
+        assert observed.poll_seen_count == 1
+        assert drained is not None
+        assert drained.items_total == 1
+        assert drained.items_processed == 1
+        assert count_raw_messages(conn) == 1
+
+    def test_observe_and_drain_chat_message_leaves_event_pending_until_poll_arrives(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        msg = _chat_msg("msg-bridge-event")
+        observed, drained = observe_and_drain_chat_message(
+            conn,
+            message=msg,
+            intake_path=IntakePath.EVENT,
+            observed_at="2026-04-14T10:00:00Z",
+            coalesce_window_seconds=60,
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _delay: None,
+        )
+
+        assert observed.processing_state is ChatIntakeState.PENDING
+        assert drained is None
+        assert count_raw_messages(conn) == 0
+
+        polled, drained = observe_and_drain_chat_message(
+            conn,
+            message=msg,
+            intake_path=IntakePath.POLL,
+            observed_at="2026-04-14T10:01:00Z",
+            lock_path=tmp_path / ".ltn.lock",
+            sleep_fn=lambda _delay: None,
+        )
+
+        item = get_chat_intake_item(conn, chat_ingest_key(msg.source_id, msg.message_id))
+        assert polled.poll_seen_count == 1
+        assert polled.event_seen_count == 1
+        assert drained is not None
+        assert drained.items_total == 1
+        assert drained.items_processed == 1
+        assert count_raw_messages(conn) == 1
+        assert item is not None
+        assert item.processing_state is ChatIntakeState.PROCESSED
 
 
 # ---------------------------------------------------------------------------

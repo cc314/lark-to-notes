@@ -25,6 +25,7 @@ from lark_to_notes.budget.models import (
     FallbackReason,
     ProviderRoute,
     QualityMetrics,
+    QualityMetricsReport,
     UsageRecord,
 )
 from lark_to_notes.budget.store import (
@@ -34,6 +35,7 @@ from lark_to_notes.budget.store import (
     put_content_cache,
     record_usage,
     rollup_quality_metrics,
+    rollup_quality_metrics_report,
 )
 
 if TYPE_CHECKING:
@@ -129,6 +131,10 @@ class BudgetEnforcer:
             summarising all feedback events in the database.
         """
         return rollup_quality_metrics(self._conn)
+
+    def get_quality_metrics_report(self) -> QualityMetricsReport:
+        """Return overall and grouped feedback quality metrics."""
+        return rollup_quality_metrics_report(self._conn)
 
     def get_run_snapshot(self, run_id: str) -> BudgetSnapshot:
         """Return the budget snapshot for a specific runtime run.

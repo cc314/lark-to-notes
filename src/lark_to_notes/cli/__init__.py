@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
+import sqlite3
 import time
 import tomllib
 from dataclasses import asdict
-from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -18,12 +17,14 @@ from lark_to_notes.feedback import (
     apply_feedback_artifact,
     load_feedback_artifact,
 )
+from lark_to_notes.feedback.draft import render_feedback_draft_yaml
 from lark_to_notes.intake.replay import replay_jsonl_dir
 from lark_to_notes.storage.db import connect, init_db, list_watched_sources
 from lark_to_notes.storage.schema import SCHEMA_VERSION, all_versions
 from lark_to_notes.testing import FixtureReplayFile, load_fixture_corpus
 
 if TYPE_CHECKING:
+    import sqlite3
     from collections.abc import Callable
 
     from lark_to_notes.config.sources import WatchedSource
@@ -120,7 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     feedback_parser = subparsers.add_parser(
         "feedback",
-        help="Import structured review feedback",
+        help="Structured review feedback: import YAML or draft review-lane stubs",
     )
     feedback_subparsers = feedback_parser.add_subparsers(dest="feedback_command", required=True)
     feedback_import_parser = feedback_subparsers.add_parser(
@@ -135,6 +136,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit machine-readable JSON",
     )
     feedback_import_parser.set_defaults(handler=_handle_feedback_import)
+
+    feedback_draft_parser = feedback_subparsers.add_parser(
+        "draft",
+        help="Write a YAML feedback sidecar listing review-lane tasks (edit before import)",
+    )
+    feedback_draft_parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="Output path for the draft YAML file",
+    )
+    feedback_draft_parser.add_argument("--db", type=Path, default=_default_db_path())
+    feedback_draft_parser.add_argument(
+        "--limit",
+        type=int,
+        default=200,
+        help="Maximum review-lane tasks to include (default: 200)",
+    )
+    feedback_draft_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON summary",
+    )
+    feedback_draft_parser.set_defaults(handler=_handle_feedback_draft)
 
     reclassify_parser = subparsers.add_parser(
         "reclassify",
@@ -156,6 +181,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Classify but do not write tasks to the database",
+    )
+    reclassify_parser.add_argument(
+        "--extra-high-pattern",
+        action="append",
+        default=[],
+        metavar="REGEX::SIGNAL",
+        help="Add a deterministic high-confidence classifier pattern",
+    )
+    reclassify_parser.add_argument(
+        "--extra-medium-pattern",
+        action="append",
+        default=[],
+        metavar="REGEX::SIGNAL",
+        help="Add a deterministic medium-confidence classifier pattern",
+    )
+    reclassify_parser.add_argument(
+        "--min-content-length-for-llm",
+        type=int,
+        default=800,
+        help="Minimum content length that marks heuristic matches for LLM escalation",
     )
     reclassify_parser.add_argument(
         "--json",
@@ -381,7 +426,8 @@ def _handle_replay(args: argparse.Namespace) -> int:
 
 
 def _handle_doctor(args: argparse.Namespace) -> int:
-    from lark_to_notes.runtime.registry import health_report
+    from lark_to_notes.runtime.models import RunStatus
+    from lark_to_notes.runtime.registry import health_report, list_dead_letters, list_runs
 
     corpus = load_fixture_corpus(args.fixture_corpus)
     replay_conn = connect(":memory:")
@@ -392,6 +438,28 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     runtime_conn = connect(runtime_db_path)
     init_db(runtime_conn)
     runtime_health = health_report(runtime_conn)
+    failed_runs = [
+        {
+            "run_id": run.run_id,
+            "command": run.command,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+            "items_failed": run.items_failed,
+            "error": run.error,
+        }
+        for run in list_runs(runtime_conn, status=RunStatus.FAILED, limit=5)
+    ]
+    dead_letters = [
+        {
+            "dl_id": item.dl_id,
+            "source_id": item.source_id,
+            "raw_message_id": item.raw_message_id,
+            "attempt_count": item.attempt_count,
+            "last_error": item.last_error,
+            "quarantined_at": item.quarantined_at,
+        }
+        for item in list_dead_letters(runtime_conn, limit=5)
+    ]
     payload = {
         "status": "ok" if replay_summary.total_records == corpus.record_count else "error",
         "schema_version": SCHEMA_VERSION,
@@ -412,6 +480,10 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "matches_manifest": replay_summary.total_records == corpus.record_count,
         },
         "runtime": asdict(runtime_health),
+        "runtime_diagnostics": {
+            "recent_failed_runs": failed_runs,
+            "recent_dead_letters": dead_letters,
+        },
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -431,6 +503,12 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             f"{runtime_health.run_count_total} run(s), "
             f"{runtime_health.dead_letter_count} dead letter(s), "
             f"error_rate={runtime_health.error_rate:.3f}"
+        )
+        print(
+            "runtime_diag: "
+            f"{len(failed_runs)} failed run(s), "
+            f"{len(dead_letters)} recent dead letter(s), "
+            f"duplicates={runtime_health.duplicate_event_count}"
         )
     return 0
 
@@ -492,6 +570,33 @@ def _handle_feedback_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_feedback_draft(args: argparse.Namespace) -> int:
+    from lark_to_notes.tasks.registry import list_review_feedback_candidates
+
+    db_path: Path = args.db
+    out_path: Path = args.out
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(db_path)
+    init_db(conn)
+    candidates = list_review_feedback_candidates(conn, limit=args.limit)
+    text = render_feedback_draft_yaml(candidates)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(text, encoding="utf-8")
+    payload: dict[str, Any] = {
+        "db_path": str(db_path),
+        "out_path": str(out_path),
+        "task_count": len(candidates),
+        "task_ids": [t.task_id for t in candidates],
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"wrote {payload['task_count']} task(s) to {payload['out_path']}")
+        print(f"db_path: {payload['db_path']}")
+        print("edit each action, then run: lark-to-notes feedback import <path> --db ...")
+    return 0
+
+
 def _handle_sources_validate(args: argparse.Namespace) -> int:
     db_path: Path = args.db
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -545,7 +650,7 @@ def _handle_reclassify(args: argparse.Namespace) -> int:
     from uuid import uuid4
 
     from lark_to_notes.budget import BudgetEnforcer, BudgetPolicy
-    from lark_to_notes.distill import DistillInput, classify_with_routing, default_classifier
+    from lark_to_notes.distill import DistillInput, HeuristicClassifier, classify_with_routing
     from lark_to_notes.intake.ledger import list_raw_messages
     from lark_to_notes.tasks import derive_fingerprint, upsert_task
     from lark_to_notes.tasks.registry import get_task_by_fingerprint
@@ -557,7 +662,21 @@ def _handle_reclassify(args: argparse.Namespace) -> int:
     init_db(conn)
 
     messages = list_raw_messages(conn, source_id=args.source_id, limit=args.limit)
-    classifier = default_classifier
+    try:
+        extra_high_patterns = _parse_classifier_pattern_args(args.extra_high_pattern)
+        extra_medium_patterns = _parse_classifier_pattern_args(args.extra_medium_pattern)
+    except ValueError as exc:
+        error_payload = {"db_path": str(db_path), "error": str(exc)}
+        if args.json:
+            print(json.dumps(error_payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"error: {exc}")
+        return 1
+    classifier = HeuristicClassifier(
+        extra_high_patterns=extra_high_patterns,
+        extra_medium_patterns=extra_medium_patterns,
+        min_content_length_for_llm=args.min_content_length_for_llm,
+    )
     budget_enforcer = BudgetEnforcer(conn, BudgetPolicy())
     budget_run_id = f"reclassify:{uuid4()}"
 
@@ -580,7 +699,12 @@ def _handle_reclassify(args: argparse.Namespace) -> int:
             budget_enforcer=budget_enforcer,
             run_id=budget_run_id,
         )
-        fp = derive_fingerprint(msg.content, msg.source_id, msg.created_at)
+        fp = derive_fingerprint(
+            msg.content,
+            msg.source_id,
+            msg.created_at,
+            source_type=msg.source_type,
+        )
         if dry_run:
             # Check fingerprint without writing.
             if get_task_by_fingerprint(conn, fp) is None:
@@ -607,7 +731,7 @@ def _handle_reclassify(args: argparse.Namespace) -> int:
     if not dry_run:
         conn.commit()
 
-    payload = {
+    payload: dict[str, Any] = {
         "db_path": str(db_path),
         "dry_run": dry_run,
         "messages_processed": len(messages),
@@ -626,6 +750,20 @@ def _handle_reclassify(args: argparse.Namespace) -> int:
             f"skipped {payload['tasks_skipped']} existing"
         )
     return 0
+
+
+def _parse_classifier_pattern_args(raw_values: list[str]) -> list[tuple[str, str]]:
+    parsed: list[tuple[str, str]] = []
+    for raw in raw_values:
+        regex, sep, signal = raw.partition("::")
+        regex = regex.strip()
+        signal = signal.strip()
+        if sep == "" or regex == "" or signal == "":
+            raise ValueError(
+                f"classifier pattern must use REGEX::SIGNAL format (received: {raw!r})"
+            )
+        parsed.append((regex, signal))
+    return parsed
 
 
 def _handle_render(args: argparse.Namespace) -> int:
@@ -700,7 +838,7 @@ def _handle_reconcile(args: argparse.Namespace) -> int:
     live_result = None
     if config_path is not None:
         try:
-            config, service = _load_worker_service(config_path)
+            config, service = _load_worker_service(config_path, conn)
         except Exception as exc:
             return _print_live_worker_error(
                 command="reconcile",
@@ -790,13 +928,39 @@ def _handle_budget_status(args: argparse.Namespace) -> int:
         today = datetime.date.today().isoformat()
         snap = enforcer.get_day_snapshot(today)
         scope = f"day={today} (default)"
-    quality_metrics = enforcer.get_quality_metrics()
+    quality_metrics_report = enforcer.get_quality_metrics_report()
+    quality_metrics = quality_metrics_report.overall
 
     payload: dict[str, Any] = {
         "db_path": str(db_path),
         "scope": scope,
         "cache_hit_rate": snap.cache_hit_rate,
         "quality_metrics": asdict(quality_metrics),
+        "quality_metrics_scopes": {
+            "latest_artifact_path": quality_metrics_report.latest_artifact_path,
+            "latest_artifact": asdict(quality_metrics_report.latest_artifact),
+            "rolling_7d": asdict(quality_metrics_report.rolling_7d),
+            "rolling_30d": asdict(quality_metrics_report.rolling_30d),
+            "by_artifact_path": {
+                key: asdict(value) for key, value in quality_metrics_report.by_artifact_path.items()
+            },
+            "by_day": {key: asdict(value) for key, value in quality_metrics_report.by_day.items()},
+        },
+        "quality_metrics_breakdown": {
+            "by_target_type": {
+                key: asdict(value) for key, value in quality_metrics_report.by_target_type.items()
+            },
+            "by_source_type": {
+                key: asdict(value) for key, value in quality_metrics_report.by_source_type.items()
+            },
+            "by_policy_version": {
+                key: asdict(value)
+                for key, value in quality_metrics_report.by_policy_version.items()
+            },
+            "by_promotion_rec": {
+                key: asdict(value) for key, value in quality_metrics_report.by_promotion_rec.items()
+            },
+        },
     }
     if snap.call_count == 0:
         payload["status"] = "no_records"
@@ -839,6 +1003,50 @@ def _handle_budget_status(args: argparse.Namespace) -> int:
             f"duplicate={quality_metrics.duplicate_count} "
             f"review={quality_metrics.review_rate:.2%}"
         )
+        print(
+            "quality_rolling: "
+            f"7d={quality_metrics_report.rolling_7d.total_events} "
+            f"30d={quality_metrics_report.rolling_30d.total_events}"
+        )
+        latest_artifact = quality_metrics_report.latest_artifact_path or "none"
+        print(
+            "quality_latest_artifact: "
+            f"{latest_artifact} ({quality_metrics_report.latest_artifact.total_events} events)"
+        )
+        if quality_metrics_report.by_day:
+            day_summary = ", ".join(
+                f"{day_key}={metrics.total_events}"
+                for day_key, metrics in sorted(quality_metrics_report.by_day.items())[-7:]
+            )
+            print(f"quality_by_day_recent: {day_summary}")
+        if quality_metrics_report.by_target_type:
+            target_summary = ", ".join(
+                f"{target}={metrics.total_events}"
+                for target, metrics in sorted(quality_metrics_report.by_target_type.items())
+            )
+            print(f"quality_by_target_type: {target_summary}")
+        if quality_metrics_report.by_source_type:
+            source_summary = ", ".join(
+                f"{source_type}={metrics.total_events}"
+                for source_type, metrics in sorted(quality_metrics_report.by_source_type.items())
+            )
+            print(f"quality_by_source_type: {source_summary}")
+        if quality_metrics_report.by_policy_version:
+            policy_summary = ", ".join(
+                f"{policy_version}={metrics.total_events}"
+                for policy_version, metrics in sorted(
+                    quality_metrics_report.by_policy_version.items()
+                )
+            )
+            print(f"quality_by_policy_version: {policy_summary}")
+        if quality_metrics_report.by_promotion_rec:
+            promotion_summary = ", ".join(
+                f"{promotion_rec}={metrics.total_events}"
+                for promotion_rec, metrics in sorted(
+                    quality_metrics_report.by_promotion_rec.items()
+                )
+            )
+            print(f"quality_by_promotion_rec: {promotion_summary}")
     return 0
 
 
@@ -849,7 +1057,7 @@ def _handle_sync_once(args: argparse.Namespace) -> int:
     runtime_conn = connect(db_path)
     init_db(runtime_conn)
     try:
-        config, service = _load_worker_service(config_path)
+        config, service = _load_worker_service(config_path, runtime_conn)
     except Exception as exc:
         return _print_live_worker_error(
             command="sync-once",
@@ -857,6 +1065,7 @@ def _handle_sync_once(args: argparse.Namespace) -> int:
             config_path=config_path,
             exc=exc,
             json_output=args.json,
+            stage="load_worker_service",
         )
 
     from lark_to_notes.runtime.lock import RuntimeLock
@@ -886,6 +1095,7 @@ def _handle_sync_once(args: argparse.Namespace) -> int:
             exc=exc,
             json_output=args.json,
             run_id=run.run_id,
+            stage="runtime_cycle",
         )
 
     payload = {
@@ -918,7 +1128,7 @@ def _handle_sync_daemon(args: argparse.Namespace) -> int:
     runtime_conn = connect(db_path)
     init_db(runtime_conn)
     try:
-        config, service = _load_worker_service(config_path)
+        config, service = _load_worker_service(config_path, runtime_conn)
     except Exception as exc:
         return _print_live_worker_error(
             command="sync-daemon",
@@ -926,6 +1136,7 @@ def _handle_sync_daemon(args: argparse.Namespace) -> int:
             config_path=config_path,
             exc=exc,
             json_output=args.json,
+            stage="load_worker_service",
         )
 
     from lark_to_notes.runtime.lock import RuntimeLock
@@ -964,6 +1175,7 @@ def _handle_sync_daemon(args: argparse.Namespace) -> int:
                     exc=exc,
                     json_output=args.json,
                     run_id=run.run_id,
+                    stage=f"cycle:{cycle_count}",
                 )
 
             inserted_messages += result.get("inserted_messages", 0)
@@ -1006,7 +1218,7 @@ def _handle_backfill(args: argparse.Namespace) -> int:
     runtime_conn = connect(db_path)
     init_db(runtime_conn)
     try:
-        config, service = _load_worker_service(config_path)
+        config, service = _load_worker_service(config_path, runtime_conn)
     except Exception as exc:
         return _print_live_worker_error(
             command="backfill",
@@ -1014,6 +1226,7 @@ def _handle_backfill(args: argparse.Namespace) -> int:
             config_path=config_path,
             exc=exc,
             json_output=args.json,
+            stage="load_worker_service",
         )
 
     from lark_to_notes.runtime.lock import RuntimeLock
@@ -1048,6 +1261,7 @@ def _handle_backfill(args: argparse.Namespace) -> int:
             exc=exc,
             json_output=args.json,
             run_id=run.run_id,
+            stage="runtime_backfill",
         )
 
     payload = {
@@ -1105,13 +1319,16 @@ def _stored_source_states(conn: Any) -> dict[str, Any]:
     }
 
 
-def _load_worker_service(config_path: Path) -> tuple[Any, Any]:
-    config_module = importlib.import_module("automation.lark_worker.config")
-    service_module = importlib.import_module("automation.lark_worker.service")
+def _load_worker_service(config_path: Path, runtime_conn: sqlite3.Connection) -> tuple[Any, Any]:
+    """Load the in-repo live chat adapter (``lark-cli`` transport + canonical ledger)."""
+
+    from lark_to_notes.live.chat_live import ChatLiveAdapter
+    from lark_to_notes.live.worker_config import load_live_worker_config
+
     resolved = config_path.expanduser().resolve()
-    config = cast("Any", config_module.load_config(resolved))
-    worker_service = cast("Any", service_module.WorkerService)
-    return config, worker_service(config)
+    snapshot = load_live_worker_config(resolved)
+    adapter = ChatLiveAdapter(snapshot, runtime_conn)
+    return adapter.config, adapter
 
 
 def _worker_poll_once(service: Any, *, sync_notes: bool) -> dict[str, int]:
@@ -1136,113 +1353,20 @@ def _worker_backfill(
 
 
 def _mirror_worker_state(runtime_conn: Any, worker_config: Any) -> None:
-    from lark_to_notes.config.sources import Checkpoint, WatchedSource
-    from lark_to_notes.storage.db import upsert_checkpoint, upsert_watched_source
+    """Historical hook for copying worker SQLite state into the canonical DB.
 
-    worker_db_module = importlib.import_module("automation.lark_worker.db")
-    worker_connect = cast("Any", worker_db_module.connect)
-    with worker_connect(worker_config.state_db) as worker_conn:
-        source_rows = worker_conn.execute(
-            "SELECT source_id, source_type, external_id, name, enabled FROM watched_sources"
-        ).fetchall()
-        checkpoint_rows = worker_conn.execute(
-            """
-            SELECT source_id, last_message_id, last_message_timestamp, page_token, updated_at
-            FROM checkpoints
-            """
-        ).fetchall()
-
-    for row in source_rows:
-        upsert_watched_source(
-            runtime_conn,
-            WatchedSource(
-                source_id=row["source_id"],
-                source_type=_map_worker_source_type(row["source_type"]),
-                external_id=row["external_id"],
-                name=row["name"],
-                enabled=bool(row["enabled"]),
-                config={"worker_source_type": row["source_type"]},
-            ),
-        )
-    for row in checkpoint_rows:
-        upsert_checkpoint(
-            runtime_conn,
-            Checkpoint(
-                source_id=row["source_id"],
-                last_message_id=row["last_message_id"],
-                last_message_timestamp=row["last_message_timestamp"],
-                page_token=row["page_token"],
-                updated_at=row["updated_at"],
-            ),
-        )
+    The in-repo live adapter writes watched sources and checkpoints directly
+    into the canonical database, so this mirror is a no-op.
+    """
+    _ = (runtime_conn, worker_config)
 
 
 def _collect_live_source_states(service: Any, runtime_conn: Any) -> dict[str, Any]:
-    from lark_to_notes.runtime.reconcile import SourceState
-    from lark_to_notes.storage.db import get_checkpoint
+    from lark_to_notes.live.chat_live import ChatLiveAdapter
 
-    end_date = (date.today() + timedelta(days=1)).isoformat()
-    source_states: dict[str, Any] = {}
-    for source in service.config.enabled_sources:
-        checkpoint = get_checkpoint(runtime_conn, source.source_id)
-        if source.source_type not in {"dm_user", "chat"}:
-            if checkpoint is None:
-                continue
-            source_states[source.source_id] = SourceState(
-                source_id=source.source_id,
-                latest_message_id=checkpoint.last_message_id or "",
-                latest_message_timestamp=checkpoint.last_message_timestamp or "",
-            )
-            continue
-
-        response = service.client.list_chat_messages(
-            source=source,
-            start_date=_live_start_date(
-                checkpoint.last_message_timestamp if checkpoint is not None else None,
-                lookback_days=service.config.poll_lookback_days,
-            ),
-            end_date=end_date,
-            page_size=1,
-            sort="desc",
-        )
-        messages = response.get("data", {}).get("messages", [])
-        if messages:
-            latest = messages[0]
-            source_states[source.source_id] = SourceState(
-                source_id=source.source_id,
-                latest_message_id=latest.get("message_id", ""),
-                latest_message_timestamp=latest.get("create_time", ""),
-            )
-            continue
-        if checkpoint is None:
-            continue
-        source_states[source.source_id] = SourceState(
-            source_id=source.source_id,
-            latest_message_id=checkpoint.last_message_id or "",
-            latest_message_timestamp=checkpoint.last_message_timestamp or "",
-        )
-    return source_states
-
-
-def _live_start_date(timestamp: str | None, *, lookback_days: int) -> str:
-    if timestamp:
-        return timestamp.split("T", 1)[0].split(" ", 1)[0]
-    return (date.today() - timedelta(days=lookback_days)).isoformat()
-
-
-def _map_worker_source_type(source_type: str) -> Any:
-    from lark_to_notes.config.sources import SourceType
-
-    mapping = {
-        "dm_user": SourceType.DM,
-        "dm": SourceType.DM,
-        "chat": SourceType.GROUP,
-        "group": SourceType.GROUP,
-        "doc": SourceType.DOC,
-    }
-    if source_type not in mapping:
-        raise ValueError(f"unsupported worker source_type: {source_type!r}")
-    return mapping[source_type]
+    if isinstance(service, ChatLiveAdapter):
+        return service.collect_live_source_states(runtime_conn)
+    raise TypeError("live reconcile requires ChatLiveAdapter from _load_worker_service")
 
 
 def _runtime_lock_path(worker_config: Any) -> Path:
@@ -1259,27 +1383,58 @@ def _print_live_worker_error(
     exc: Exception,
     json_output: bool,
     run_id: str | None = None,
+    stage: str = "unknown",
 ) -> int:
     error_text = str(exc).strip() or exc.__class__.__name__
-    guidance = (
-        "If this is an auth or scope-expiry issue, re-authenticate with "
-        "`lark-cli auth login --as user` and confirm the watched sources are "
-        "visible to the configured Lark app."
+    lowered = error_text.lower()
+    auth_related = any(
+        token in lowered
+        for token in (
+            "auth",
+            "token",
+            "scope",
+            "permission",
+            "unauthorized",
+            "forbidden",
+            "401",
+            "403",
+            "expired",
+        )
     )
+    if auth_related:
+        error_kind = "auth_scope"
+        next_actions = [
+            "Run `lark-cli auth login --as user` to refresh credentials.",
+            "Verify source visibility and scopes for the configured app.",
+            "Retry the command after re-authentication.",
+        ]
+    else:
+        error_kind = "runtime_failure"
+        next_actions = [
+            "Inspect runtime diagnostics (`doctor --json`) for failed runs/dead letters.",
+            "Retry once if this was a transient upstream or network issue.",
+            "Escalate with run_id and stage details if the failure repeats.",
+        ]
     payload = {
         "status": "error",
         "command": command,
         "db_path": str(db_path),
         "config_path": str(config_path),
         "runtime_run_id": run_id,
+        "stage": stage,
+        "error_kind": error_kind,
         "error": error_text,
-        "guidance": guidance,
+        "auth_related": auth_related,
+        "next_actions": next_actions,
     }
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"error: {error_text}")
-        print(guidance)
+        print(f"stage: {stage}")
+        print(f"error_kind: {error_kind}")
+        for action in next_actions:
+            print(f"- {action}")
     return 1
 
 

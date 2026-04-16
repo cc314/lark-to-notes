@@ -254,3 +254,43 @@ class QualityMetrics:
             duplicate_rate=round(merge / total, 4),
             review_rate=round((wrong_class + missed_task) / total, 4),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class QualityMetricsReport:
+    """Structured quality summary for operator and tuning views.
+
+    Attributes:
+        overall:         Rollup across all feedback events.
+        latest_artifact_path: Most-recent non-empty feedback artifact path, or
+                         ``None`` when unavailable.
+        latest_artifact: Per-import quality rollup for
+                         ``latest_artifact_path``.
+        rolling_7d:      Rolling quality rollup across the trailing 7 days.
+        rolling_30d:     Rolling quality rollup across the trailing 30 days.
+        by_artifact_path: Per-import rollups keyed by ``artifact_path``. This
+                         serves as the per-run quality view for review imports.
+        by_day:          Per-day rollups keyed by ``YYYY-MM-DD`` for operator
+                         trend summaries.
+        by_target_type:  Per-target-type rollups such as ``task`` and
+                         ``source_item``.
+        by_source_type:  Per-source-surface rollups such as ``dm_user``,
+                         ``chat``, or ``unknown`` when the current schema
+                         cannot resolve a source type for a feedback event.
+        by_policy_version: Per-policy-version rollups when feedback artifacts
+                         provide that context.
+        by_promotion_rec: Per-review-lane or promotion-outcome rollups such as
+                         ``review``, ``current_tasks``, or ``daily_only``.
+    """
+
+    overall: QualityMetrics
+    latest_artifact_path: str | None = None
+    latest_artifact: QualityMetrics = field(default_factory=QualityMetrics.from_counts)
+    rolling_7d: QualityMetrics = field(default_factory=QualityMetrics.from_counts)
+    rolling_30d: QualityMetrics = field(default_factory=QualityMetrics.from_counts)
+    by_artifact_path: dict[str, QualityMetrics] = field(default_factory=dict)
+    by_day: dict[str, QualityMetrics] = field(default_factory=dict)
+    by_target_type: dict[str, QualityMetrics] = field(default_factory=dict)
+    by_source_type: dict[str, QualityMetrics] = field(default_factory=dict)
+    by_policy_version: dict[str, QualityMetrics] = field(default_factory=dict)
+    by_promotion_rec: dict[str, QualityMetrics] = field(default_factory=dict)

@@ -149,6 +149,7 @@ def test_init_db_creates_tables() -> None:
     assert "feedback_events" in tables
     assert "llm_usage_records" in tables
     assert "content_cache" in tables
+    assert "document_intake_ledger" in tables
 
 
 def test_init_db_is_idempotent() -> None:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from lark_to_notes.cli import run
 from lark_to_notes.config.sources import SourceType, WatchedSource, make_source_id
@@ -16,9 +17,10 @@ from lark_to_notes.feedback import (
     FeedbackDirective,
     render_feedback_artifact,
 )
+from lark_to_notes.feedback.draft import DRAFT_ACTION_PLACEHOLDER
 from lark_to_notes.storage.db import connect, init_db, upsert_watched_source
 from lark_to_notes.tasks import derive_fingerprint
-from lark_to_notes.tasks.registry import get_task_by_fingerprint
+from lark_to_notes.tasks.registry import get_task, get_task_by_fingerprint
 
 FIXTURE_CORPUS_ROOT = (
     Path(__file__).resolve().parent / "fixtures" / "lark-worker" / "fixture-corpus"
@@ -200,7 +202,12 @@ def _execute_full_workflow(
     assert exit_code == 0
 
     conn = connect(db_path)
-    review_fingerprint = derive_fingerprint(REVIEW_CONTENT, source.source_id, REVIEW_CREATED_AT)
+    review_fingerprint = derive_fingerprint(
+        REVIEW_CONTENT,
+        source.source_id,
+        REVIEW_CREATED_AT,
+        source_type="dm_user",
+    )
     review_task = get_task_by_fingerprint(conn, review_fingerprint)
     assert review_task is not None
     artifact_path = _make_feedback_artifact(tmp_path, task_id=review_task.task_id)
@@ -400,3 +407,161 @@ def test_cli_workflow_render_after_feedback_reflects_override(
     assert review_task_id in raw_text
     assert review_task_fingerprint in current_tasks_text
     assert review_task_title in current_tasks_text
+
+
+def test_live_like_same_body_two_source_types_yield_distinct_tasks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Cross-surface fingerprinting must not merge chat vs DM bodies that normalize the same."""
+    db_path = tmp_path / "state.db"
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    conn = connect(db_path)
+    init_db(conn)
+    source = WatchedSource(
+        source_id=make_source_id(SourceType.DM, "ou_split"),
+        source_type=SourceType.DM,
+        external_id="ou_split",
+        name="Split fingerprint demo",
+    )
+    upsert_watched_source(conn, source)
+    conn.commit()
+
+    shared_body = (
+        "unique shared collision body zeta eta theta iota kappa lambda mu nu xi omicron pi rho"
+    )
+    records = [
+        _message_record(
+            message_id="om_split_dm",
+            source_id=source.source_id,
+            created_at="2026-05-02T11:00:00Z",
+            content=shared_body,
+        )
+        | {"source_type": "dm_user"},
+        _message_record(
+            message_id="om_split_grp",
+            source_id=source.source_id,
+            created_at="2026-05-02T11:00:05Z",
+            content=shared_body,
+        )
+        | {"source_type": "group_user"},
+    ]
+    (raw_dir / "2026-05-02.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+    fp_dm = derive_fingerprint(
+        shared_body,
+        source.source_id,
+        "2026-05-02T11:00:00Z",
+        source_type="dm_user",
+    )
+    fp_grp = derive_fingerprint(
+        shared_body,
+        source.source_id,
+        "2026-05-02T11:00:05Z",
+        source_type="group_user",
+    )
+    assert fp_dm != fp_grp
+
+    assert (
+        _run_json(capsys, ["replay", "--db", str(db_path), "--raw-dir", str(raw_dir), "--json"])[0]
+        == 0
+    )
+    assert _run_json(capsys, ["reclassify", "--db", str(db_path), "--json"])[0] == 0
+
+    conn = connect(db_path)
+    t_dm = get_task_by_fingerprint(conn, fp_dm)
+    t_grp = get_task_by_fingerprint(conn, fp_grp)
+    assert t_dm is not None and t_grp is not None
+    assert t_dm.task_id != t_grp.task_id
+
+
+def test_feedback_override_stable_after_idempotent_replay_reclassify(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Operator feedback must survive the same replay+reclassify path live sync repeats."""
+    context, _payloads = _execute_full_workflow(tmp_path, capsys)
+    db_path = Path(context["db_path"])
+    raw_dir = Path(context["raw_dir"])
+    review_task_id = str(context["review_task_id"])
+
+    conn = connect(db_path)
+    before = get_task(conn, review_task_id)
+    assert before is not None
+    assert before.manual_override_state is not None
+
+    assert (
+        _run_json(capsys, ["replay", "--db", str(db_path), "--raw-dir", str(raw_dir), "--json"])[0]
+        == 0
+    )
+    assert _run_json(capsys, ["reclassify", "--db", str(db_path), "--json"])[0] == 0
+
+    conn = connect(db_path)
+    after = get_task(conn, review_task_id)
+    assert after is not None
+    assert after.task_id == before.task_id
+    assert after.fingerprint == before.fingerprint
+    assert after.task_class == before.task_class
+    assert after.status == before.status
+    assert after.promotion_rec == before.promotion_rec
+    assert after.manual_override_state == before.manual_override_state
+
+
+def test_feedback_draft_yaml_round_trips_through_import_after_operator_edit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review-lane tasks from replay appear in ``feedback draft`` and accept import after edits."""
+    db_path, raw_dir, _vault_root, _source, _records = _setup_workflow_environment(tmp_path)
+    assert (
+        _run_json(capsys, ["replay", "--db", str(db_path), "--raw-dir", str(raw_dir), "--json"])[0]
+        == 0
+    )
+    assert _run_json(capsys, ["reclassify", "--db", str(db_path), "--json"])[0] == 0
+
+    conn = connect(db_path)
+    review_fingerprint = derive_fingerprint(
+        REVIEW_CONTENT,
+        _source.source_id,
+        REVIEW_CREATED_AT,
+        source_type="dm_user",
+    )
+    review_task = get_task_by_fingerprint(conn, review_fingerprint)
+    assert review_task is not None
+    task_id = review_task.task_id
+
+    draft_path = tmp_path / "draft.yaml"
+    assert (
+        _run_json(
+            capsys,
+            ["feedback", "draft", "--db", str(db_path), "--out", str(draft_path), "--json"],
+        )[0]
+        == 0
+    )
+    root = yaml.safe_load(draft_path.read_text(encoding="utf-8"))
+    assert root["tasks"][task_id]["action"] == DRAFT_ACTION_PLACEHOLDER
+    root["tasks"][task_id]["action"] = "confirm"
+    root["tasks"][task_id]["task_class"] = "task"
+    fixed_path = tmp_path / "fixed.yaml"
+    fixed_path.write_text(
+        yaml.safe_dump(root, sort_keys=False, allow_unicode=False),
+        encoding="utf-8",
+    )
+
+    exit_code, payload = _run_json(
+        capsys,
+        ["feedback", "import", str(fixed_path), "--db", str(db_path), "--json"],
+    )
+    assert exit_code == 0
+    assert payload["applied_task_count"] == 1
+
+    conn = connect(db_path)
+    updated = get_task(conn, task_id)
+    assert updated is not None
+    assert updated.task_class == "task"
+    assert updated.status == "open"
+    assert updated.promotion_rec == "current_tasks"

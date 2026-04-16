@@ -8,6 +8,7 @@ Public API:
 - :class:`~lark_to_notes.budget.models.FallbackReason` — why LLM was skipped
 - :class:`~lark_to_notes.budget.models.ProviderRoute` — routing decision
 - :class:`~lark_to_notes.budget.models.QualityMetrics` — feedback-derived
+- :class:`~lark_to_notes.budget.models.QualityMetricsReport` — grouped
 - :class:`~lark_to_notes.budget.models.UsageRecord` — per-call audit row
 - :class:`~lark_to_notes.budget.policy.BudgetEnforcer` — decision engine
 - :func:`~lark_to_notes.budget.chunking.chunk_text` — large-doc splitter
@@ -31,6 +32,7 @@ from lark_to_notes.budget.models import (
     FallbackReason,
     ProviderRoute,
     QualityMetrics,
+    QualityMetricsReport,
     UsageRecord,
 )
 from lark_to_notes.budget.policy import BudgetEnforcer
@@ -41,6 +43,7 @@ from lark_to_notes.budget.store import (
     put_content_cache,
     record_usage,
     rollup_quality_metrics,
+    rollup_quality_metrics_report,
 )
 
 __all__ = [
@@ -52,6 +55,7 @@ __all__ = [
     "FallbackReason",
     "ProviderRoute",
     "QualityMetrics",
+    "QualityMetricsReport",
     "UsageRecord",
     "chunk_text",
     "coalesce_batch",
@@ -61,4 +65,5 @@ __all__ = [
     "put_content_cache",
     "record_usage",
     "rollup_quality_metrics",
+    "rollup_quality_metrics_report",
 ]

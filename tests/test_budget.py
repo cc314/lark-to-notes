@@ -14,6 +14,7 @@ Coverage:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -37,8 +38,10 @@ from lark_to_notes.budget import (
     put_content_cache,
     record_usage,
     rollup_quality_metrics,
+    rollup_quality_metrics_report,
 )
 from lark_to_notes.storage.db import init_db
+from lark_to_notes.tasks.registry import upsert_task
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -343,6 +346,167 @@ def test_rollup_quality_metrics_with_events(conn: sqlite3.Connection) -> None:
     assert metrics.review_rate == pytest.approx(0.2)
 
 
+def test_rollup_quality_metrics_report_groups_by_target_and_source_type(
+    conn: sqlite3.Connection,
+) -> None:
+    import uuid
+
+    conn.execute(
+        """
+        INSERT INTO raw_messages (
+            message_id, source_id, source_type, chat_id, chat_type,
+            sender_id, sender_name, direction, created_at, content, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "msg-task-1",
+            "dm:finance",
+            "dm_user",
+            "chat-finance",
+            "dm",
+            "ou_finance",
+            "Finance Lead",
+            "inbound",
+            "2026-04-16T08:00:00Z",
+            "Please send the revised budget update.",
+            "{}",
+        ),
+    )
+    task_id, _ = upsert_task(
+        conn,
+        fingerprint="budgetmetrics0001",
+        title="Send the revised budget update",
+        task_class="task",
+        confidence_band="high",
+        reason_code="en_please_verb",
+        promotion_rec="current_tasks",
+        created_from_raw_record_id="msg-task-1",
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_messages (
+            message_id, source_id, source_type, chat_id, chat_type,
+            sender_id, sender_name, direction, created_at, content, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "msg-source-1",
+            "chat:ops",
+            "chat",
+            "chat-ops",
+            "group",
+            "ou_ops",
+            "Ops Lead",
+            "inbound",
+            "2026-04-16T08:05:00Z",
+            "We also need to follow up with procurement.",
+            "{}",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO feedback_events (
+            feedback_id, target_type, target_id, action, payload_json, artifact_path
+        ) VALUES (?, ?, ?, ?, ?, '')
+        """,
+        (
+            str(uuid.uuid4()),
+            "task",
+            task_id,
+            "confirm",
+            json.dumps(
+                {
+                    "action": "confirm",
+                    "policy_version": "policy-v1",
+                    "promotion_rec": "current_tasks",
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO feedback_events (
+            feedback_id, target_type, target_id, action, payload_json, artifact_path
+        ) VALUES (?, ?, ?, ?, ?, '')
+        """,
+        (
+            str(uuid.uuid4()),
+            "source_item",
+            "msg-source-1",
+            "missed_task",
+            json.dumps(
+                {"action": "missed_task", "policy_version": "policy-v2", "promotion_rec": "review"}
+            ),
+        ),
+    )
+    conn.commit()
+
+    report = rollup_quality_metrics_report(conn)
+
+    assert report.overall.total_events == 2
+    assert report.by_target_type["task"].confirm_count == 1
+    assert report.by_target_type["source_item"].missed_task_count == 1
+    assert report.by_source_type["dm_user"].confirm_count == 1
+    assert report.by_source_type["chat"].missed_task_count == 1
+    assert report.by_policy_version["policy-v1"].confirm_count == 1
+    assert report.by_policy_version["policy-v2"].missed_task_count == 1
+    assert report.by_promotion_rec["current_tasks"].confirm_count == 1
+    assert report.by_promotion_rec["review"].missed_task_count == 1
+    assert report.by_artifact_path["unknown"].total_events == 2
+    assert report.by_day
+    assert report.rolling_7d.total_events == 2
+    assert report.rolling_30d.total_events == 2
+
+
+def test_rollup_quality_metrics_report_includes_rolling_and_per_import_scopes(
+    conn: sqlite3.Connection,
+) -> None:
+    import uuid
+
+    conn.execute(
+        """
+        INSERT INTO feedback_events (
+            feedback_id, target_type, target_id, action, created_at, artifact_path
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()),
+            "task",
+            "task-new",
+            "confirm",
+            "2099-01-01T09:00:00Z",
+            "runs/run-new.yaml",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO feedback_events (
+            feedback_id, target_type, target_id, action, created_at, artifact_path
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()),
+            "task",
+            "task-old",
+            "dismiss",
+            "2000-01-01T09:00:00Z",
+            "runs/run-old.yaml",
+        ),
+    )
+    conn.commit()
+
+    report = rollup_quality_metrics_report(conn)
+
+    assert report.latest_artifact_path == "runs/run-new.yaml"
+    assert report.latest_artifact.confirm_count == 1
+    assert report.by_artifact_path["runs/run-new.yaml"].confirm_count == 1
+    assert report.by_artifact_path["runs/run-old.yaml"].dismiss_count == 1
+    assert report.rolling_7d.confirm_count == 1
+    assert report.rolling_7d.dismiss_count == 0
+    assert report.rolling_30d.confirm_count == 1
+    assert report.rolling_30d.dismiss_count == 0
+
+
 # ---------------------------------------------------------------------------
 # BudgetEnforcer (policy) tests
 # ---------------------------------------------------------------------------
@@ -451,6 +615,22 @@ def test_enforcer_get_quality_metrics(conn: sqlite3.Connection) -> None:
     enforcer = BudgetEnforcer(conn, BudgetPolicy())
     metrics = enforcer.get_quality_metrics()
     assert metrics.total_events == 0
+
+
+def test_enforcer_get_quality_metrics_report(conn: sqlite3.Connection) -> None:
+    enforcer = BudgetEnforcer(conn, BudgetPolicy())
+    report = enforcer.get_quality_metrics_report()
+    assert report.overall.total_events == 0
+    assert report.latest_artifact_path is None
+    assert report.latest_artifact.total_events == 0
+    assert report.rolling_7d.total_events == 0
+    assert report.rolling_30d.total_events == 0
+    assert report.by_artifact_path == {}
+    assert report.by_day == {}
+    assert report.by_target_type == {}
+    assert report.by_source_type == {}
+    assert report.by_policy_version == {}
+    assert report.by_promotion_rec == {}
 
 
 def test_enforcer_get_run_snapshot(conn: sqlite3.Connection) -> None:

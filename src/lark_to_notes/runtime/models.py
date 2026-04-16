@@ -95,6 +95,10 @@ class HealthReport:
         error_rate:          Fraction of completed runs that failed
                               (``items_failed / (items_processed + items_failed)``
                               across all completed runs, clamped to ``[0, 1]``).
+        repeated_item_count: Number of canonical intake rows observed more than
+                             once (useful duplicate-pressure signal).
+        duplicate_event_count: Total duplicate observations beyond first sighting
+                               across mixed poll/event intake rows.
     """
 
     run_count_total: int
@@ -107,6 +111,8 @@ class HealthReport:
     last_run_command: str | None = None
     last_run_status: str | None = None
     lag_seconds: float | None = None
+    repeated_item_count: int = 0
+    duplicate_event_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)

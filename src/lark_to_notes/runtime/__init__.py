@@ -5,6 +5,7 @@ from __future__ import annotations
 from lark_to_notes.runtime.executor import (
     execute_reconcile_run,
     execute_work_batch,
+    observe_and_drain_chat_message,
     run_background_runtime,
 )
 from lark_to_notes.runtime.lock import LockAcquisitionError, RuntimeLock
@@ -55,6 +56,7 @@ __all__ = [
     "health_report",
     "list_dead_letters",
     "list_runs",
+    "observe_and_drain_chat_message",
     "quarantine_item",
     "reconcile_cursors",
     "run_background_runtime",

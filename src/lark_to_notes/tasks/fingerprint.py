@@ -33,25 +33,36 @@ def derive_fingerprint(
     content: str,
     source_id: str,
     created_at: str,
+    *,
+    source_type: str = "",
 ) -> str:
     """Return a 16-character hex fingerprint for one raw message.
 
     The fingerprint is derived from the normalised leading text of
-    *content*, the *source_id*, and the ISO week that *created_at* falls
-    in.
+    *content*, source identity context, and the ISO week that *created_at*
+    falls in.
 
     Args:
         content:    Full message text.
         source_id:  Watched-source identifier.
         created_at: Timestamp in either ``"YYYY-MM-DD HH:MM"`` (Lark
                     format) or ISO 8601 format.
+        source_type: Optional source-surface discriminator (for example
+                    ``dm_user``, ``chat``, ``doc_comment``). Including this
+                    avoids cross-surface collisions when the same source
+                    anchor carries different item classes.
 
     Returns:
         A 16-character lowercase hex string.
     """
     normalised = _normalize_text(content)[:_CONTENT_WINDOW]
     bucket = _week_bucket(created_at)
-    raw = f"{source_id}\x00{bucket}\x00{normalised}"
+    stable_source_type = source_type.strip().lower()
+    if stable_source_type:
+        raw = f"{source_id}\x00{stable_source_type}\x00{bucket}\x00{normalised}"
+    else:
+        # Preserve the legacy fingerprint contract when no source_type is provided.
+        raw = f"{source_id}\x00{bucket}\x00{normalised}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 

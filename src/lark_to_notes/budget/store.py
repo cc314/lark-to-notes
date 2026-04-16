@@ -7,14 +7,17 @@ Provides:
 - :func:`put_content_cache` — store an LLM result keyed by content hash
 - :func:`get_content_cache` — retrieve a cached result or ``None`` if stale
 - :func:`rollup_quality_metrics` — aggregate feedback-event action counts
+- :func:`rollup_quality_metrics_report` — aggregate operator-facing quality
+  breakdowns by target and source context
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from collections import defaultdict
+from typing import TYPE_CHECKING, cast
 
-from lark_to_notes.budget.models import BudgetSnapshot, QualityMetrics
+from lark_to_notes.budget.models import BudgetSnapshot, QualityMetrics, QualityMetricsReport
 
 if TYPE_CHECKING:
     import sqlite3
@@ -246,6 +249,171 @@ def rollup_quality_metrics(conn: sqlite3.Connection) -> QualityMetrics:
     ).fetchall()
 
     counts: dict[str, int] = {str(r[0]): int(r[1]) for r in rows}
+    return _quality_metrics_from_action_counts(counts)
+
+
+def rollup_quality_metrics_report(conn: sqlite3.Connection) -> QualityMetricsReport:
+    """Return overall and breakdown quality metrics for feedback events."""
+
+    by_artifact_path_rows = cast(
+        "list[tuple[str, str, int]]",
+        conn.execute(
+            """
+        SELECT
+            COALESCE(NULLIF(artifact_path, ''), 'unknown') AS artifact_path,
+            action,
+            COUNT(*) AS cnt
+        FROM feedback_events
+        GROUP BY artifact_path, action
+        """
+        ).fetchall(),
+    )
+    by_day_rows = cast(
+        "list[tuple[str, str, int]]",
+        conn.execute(
+            """
+        SELECT substr(created_at, 1, 10) AS day_key, action, COUNT(*) AS cnt
+        FROM feedback_events
+        GROUP BY day_key, action
+        """
+        ).fetchall(),
+    )
+    by_target_type_rows = cast(
+        "list[tuple[str, str, int]]",
+        conn.execute(
+            """
+        SELECT target_type, action, COUNT(*) AS cnt
+        FROM feedback_events
+        GROUP BY target_type, action
+        """
+        ).fetchall(),
+    )
+    by_source_type_rows = cast(
+        "list[tuple[str, str, int]]",
+        conn.execute(
+            """
+        WITH event_context AS (
+            SELECT
+                fe.action AS action,
+                CASE
+                    WHEN fe.target_type = 'task' THEN task_raw.source_type
+                    WHEN fe.target_type = 'source_item' THEN source_raw.source_type
+                    ELSE NULL
+                END AS source_type
+            FROM feedback_events AS fe
+            LEFT JOIN tasks AS t
+                ON fe.target_type = 'task' AND fe.target_id = t.task_id
+            LEFT JOIN raw_messages AS task_raw
+                ON t.created_from_raw_record_id = task_raw.message_id
+            LEFT JOIN raw_messages AS source_raw
+                ON fe.target_type = 'source_item' AND fe.target_id = source_raw.message_id
+        )
+        SELECT COALESCE(source_type, 'unknown') AS source_type, action, COUNT(*) AS cnt
+        FROM event_context
+        GROUP BY source_type, action
+        """
+        ).fetchall(),
+    )
+    by_policy_version_rows = cast(
+        "list[tuple[str, str, int]]",
+        conn.execute(
+            """
+        SELECT
+            COALESCE(NULLIF(json_extract(payload_json, '$.policy_version'), ''), 'unknown')
+                AS policy_version,
+            action,
+            COUNT(*) AS cnt
+        FROM feedback_events
+        GROUP BY policy_version, action
+        """
+        ).fetchall(),
+    )
+    by_promotion_rec_rows = cast(
+        "list[tuple[str, str, int]]",
+        conn.execute(
+            """
+        WITH event_context AS (
+            SELECT
+                fe.action AS action,
+                COALESCE(
+                    NULLIF(json_extract(fe.payload_json, '$.promotion_rec'), ''),
+                    NULLIF(t.promotion_rec, ''),
+                    'unknown'
+                ) AS promotion_rec
+            FROM feedback_events AS fe
+            LEFT JOIN tasks AS t
+                ON fe.target_type = 'task' AND fe.target_id = t.task_id
+        )
+        SELECT promotion_rec, action, COUNT(*) AS cnt
+        FROM event_context
+        GROUP BY promotion_rec, action
+        """
+        ).fetchall(),
+    )
+    latest_artifact_row = cast(
+        "tuple[str] | None",
+        conn.execute(
+            """
+        SELECT artifact_path
+        FROM feedback_events
+        WHERE artifact_path <> ''
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+        ).fetchone(),
+    )
+    by_artifact_path = _grouped_quality_metrics(by_artifact_path_rows)
+    latest_artifact_path = latest_artifact_row[0] if latest_artifact_row is not None else None
+    return QualityMetricsReport(
+        overall=rollup_quality_metrics(conn),
+        latest_artifact_path=latest_artifact_path,
+        latest_artifact=(
+            by_artifact_path.get(latest_artifact_path, QualityMetrics.from_counts())
+            if latest_artifact_path is not None
+            else QualityMetrics.from_counts()
+        ),
+        rolling_7d=_quality_metrics_for_time_window(conn, window_days=7),
+        rolling_30d=_quality_metrics_for_time_window(conn, window_days=30),
+        by_artifact_path=by_artifact_path,
+        by_day=_grouped_quality_metrics(by_day_rows),
+        by_target_type=_grouped_quality_metrics(by_target_type_rows),
+        by_source_type=_grouped_quality_metrics(by_source_type_rows),
+        by_policy_version=_grouped_quality_metrics(by_policy_version_rows),
+        by_promotion_rec=_grouped_quality_metrics(by_promotion_rec_rows),
+    )
+
+
+def _grouped_quality_metrics(
+    rows: list[tuple[str, str, int]],
+) -> dict[str, QualityMetrics]:
+    grouped: dict[str, dict[str, int]] = defaultdict(dict)
+    for raw_group, raw_action, raw_count in rows:
+        grouped[raw_group][raw_action] = raw_count
+    return {
+        group_key: _quality_metrics_from_action_counts(action_counts)
+        for group_key, action_counts in grouped.items()
+    }
+
+
+def _quality_metrics_for_time_window(
+    conn: sqlite3.Connection,
+    *,
+    window_days: int,
+) -> QualityMetrics:
+    rows = conn.execute(
+        """
+        SELECT action, COUNT(*) AS cnt
+        FROM feedback_events
+        WHERE julianday(created_at) >= julianday('now', '-' || ? || ' days')
+        GROUP BY action
+        """,
+        (window_days,),
+    ).fetchall()
+    counts: dict[str, int] = {str(action): int(count) for action, count in rows}
+    return _quality_metrics_from_action_counts(counts)
+
+
+def _quality_metrics_from_action_counts(counts: dict[str, int]) -> QualityMetrics:
     return QualityMetrics.from_counts(
         confirm=counts.get("confirm", 0),
         dismiss=counts.get("dismiss", 0),

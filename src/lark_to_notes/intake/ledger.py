@@ -10,13 +10,24 @@ is observable and diagnosable.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sqlite3
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from lark_to_notes.intake.models import RawMessage
+from lark_to_notes.intake.models import (
+    ChatEventAction,
+    ChatIntakeItem,
+    ChatIntakeState,
+    DocumentIntakeItem,
+    DocumentLifecycleState,
+    DocumentRecordType,
+    IntakePath,
+    RawMessage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +109,16 @@ def get_raw_message(conn: sqlite3.Connection, message_id: str) -> RawMessage | N
     return RawMessage.from_db_row(dict(row))
 
 
+def list_raw_messages_recent(conn: sqlite3.Connection, *, limit: int = 200) -> list[RawMessage]:
+    """Return the most recently ingested raw messages (``rowid`` order)."""
+
+    rows = conn.execute(
+        "SELECT * FROM raw_messages ORDER BY rowid DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [RawMessage.from_db_row(dict(row)) for row in rows]
+
+
 def list_raw_messages(
     conn: sqlite3.Connection,
     *,
@@ -155,6 +176,488 @@ def count_raw_messages(conn: sqlite3.Connection, source_id: str | None = None) -
     else:
         row = conn.execute("SELECT COUNT(*) FROM raw_messages").fetchone()
     return int(row[0]) if row else 0
+
+
+def chat_ingest_key(source_id: str, message_id: str) -> str:
+    """Return the canonical mixed-intake key for one chat message."""
+
+    raw = f"{source_id}\x00{message_id}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def document_ingest_key(
+    source_id: str,
+    record_type: DocumentRecordType,
+    source_stream_id: str,
+    source_item_id: str,
+) -> str:
+    """Return the canonical intake key for one document-side surface item."""
+
+    raw = f"{source_id}\x00{record_type.value}\x00{source_stream_id}\x00{source_item_id}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def observe_chat_message(
+    conn: sqlite3.Connection,
+    message: RawMessage,
+    *,
+    intake_path: IntakePath,
+    observed_at: str | None = None,
+    coalesce_window_seconds: int = 60,
+    event_action: ChatEventAction = ChatEventAction.CREATE,
+) -> ChatIntakeItem:
+    """Observe a chat message through the mixed poll/event intake ledger.
+
+    Polling and event-driven paths write to the same canonical row keyed by
+    ``source_id`` and ``message_id``. Event observations remain pending until
+    their coalescing window expires, while a later poll observation can make a
+    pending row immediately ready for downstream processing.
+    """
+
+    if intake_path is IntakePath.EVENT and event_action is not ChatEventAction.CREATE:
+        raise ValueError(
+            "only create chat events are supported; edit/delete events need a revision-aware path"
+        )
+
+    ingest_key = chat_ingest_key(message.source_id, message.message_id)
+    seen_at = observed_at or _utcnow_iso()
+    existing = get_chat_intake_item(conn, ingest_key)
+
+    if existing is None:
+        poll_seen_count = 1 if intake_path is IntakePath.POLL else 0
+        event_seen_count = 1 if intake_path is IntakePath.EVENT else 0
+        coalesce_until = (
+            None
+            if intake_path is IntakePath.POLL
+            else _add_seconds(seen_at, coalesce_window_seconds)
+        )
+        conn.execute(
+            """
+            INSERT INTO chat_intake_ledger (
+                ingest_key, message_id, source_id, source_type, chat_id, chat_type,
+                sender_id, sender_name, direction, created_at, content, payload_json,
+                first_seen_at, last_seen_at, first_intake_path, last_intake_path,
+                poll_seen_count, event_seen_count, coalesce_until, processing_state,
+                processed_at, last_error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ingest_key,
+                message.message_id,
+                message.source_id,
+                message.source_type,
+                message.chat_id,
+                message.chat_type,
+                message.sender_id,
+                message.sender_name,
+                message.direction,
+                message.created_at,
+                message.content,
+                message.payload_json(),
+                seen_at,
+                seen_at,
+                intake_path.value,
+                intake_path.value,
+                poll_seen_count,
+                event_seen_count,
+                coalesce_until,
+                ChatIntakeState.PENDING.value,
+                None,
+                "",
+            ),
+        )
+        conn.commit()
+        return get_chat_intake_item(conn, ingest_key) or ChatIntakeItem(
+            ingest_key=ingest_key,
+            message_id=message.message_id,
+            source_id=message.source_id,
+            source_type=message.source_type,
+            chat_id=message.chat_id,
+            chat_type=message.chat_type,
+            sender_id=message.sender_id,
+            sender_name=message.sender_name,
+            direction=message.direction,
+            created_at=message.created_at,
+            content=message.content,
+            payload=message.payload,
+            first_seen_at=seen_at,
+            last_seen_at=seen_at,
+            first_intake_path=intake_path,
+            last_intake_path=intake_path,
+            poll_seen_count=poll_seen_count,
+            event_seen_count=event_seen_count,
+            coalesce_until=coalesce_until,
+        )
+
+    coalesce_until = existing.coalesce_until
+    if existing.processing_state is ChatIntakeState.PENDING:
+        if intake_path is IntakePath.POLL:
+            coalesce_until = seen_at
+        elif existing.poll_seen_count == 0:
+            next_window = _add_seconds(seen_at, coalesce_window_seconds)
+            coalesce_until = _max_timestamp(existing.coalesce_until, next_window)
+
+    conn.execute(
+        """
+        UPDATE chat_intake_ledger SET
+            source_type = ?,
+            chat_id = ?,
+            chat_type = ?,
+            sender_id = ?,
+            sender_name = ?,
+            direction = ?,
+            created_at = ?,
+            content = ?,
+            payload_json = ?,
+            last_seen_at = ?,
+            last_intake_path = ?,
+            poll_seen_count = ?,
+            event_seen_count = ?,
+            coalesce_until = ?
+        WHERE ingest_key = ?
+        """,
+        (
+            message.source_type,
+            message.chat_id,
+            message.chat_type,
+            message.sender_id,
+            message.sender_name,
+            message.direction,
+            message.created_at,
+            message.content,
+            message.payload_json(),
+            seen_at,
+            intake_path.value,
+            existing.poll_seen_count + int(intake_path is IntakePath.POLL),
+            existing.event_seen_count + int(intake_path is IntakePath.EVENT),
+            coalesce_until,
+            ingest_key,
+        ),
+    )
+    conn.commit()
+    updated = get_chat_intake_item(conn, ingest_key)
+    if updated is None:
+        raise RuntimeError(f"chat intake row disappeared for ingest_key={ingest_key}")
+    return updated
+
+
+def get_chat_intake_item(conn: sqlite3.Connection, ingest_key: str) -> ChatIntakeItem | None:
+    """Fetch one mixed-intake ledger row by its ingest key."""
+
+    row = conn.execute(
+        "SELECT * FROM chat_intake_ledger WHERE ingest_key = ?",
+        (ingest_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    return ChatIntakeItem.from_db_row(dict(row))
+
+
+def list_ready_chat_intake(
+    conn: sqlite3.Connection,
+    *,
+    as_of: str | None = None,
+    limit: int = 100,
+) -> list[ChatIntakeItem]:
+    """Return pending chat-intake rows whose coalescing window has expired."""
+
+    ready_at = as_of or _utcnow_iso()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM chat_intake_ledger
+        WHERE processing_state = ?
+          AND (coalesce_until IS NULL OR coalesce_until <= ?)
+        ORDER BY first_seen_at ASC
+        LIMIT ?
+        """,
+        (ChatIntakeState.PENDING.value, ready_at, limit),
+    ).fetchall()
+    return [ChatIntakeItem.from_db_row(dict(row)) for row in rows]
+
+
+def mark_chat_intake_processed(
+    conn: sqlite3.Connection,
+    ingest_key: str,
+    *,
+    processed_at: str | None = None,
+) -> None:
+    """Mark a chat-intake row as processed after raw capture succeeds."""
+
+    finished_at = processed_at or _utcnow_iso()
+    conn.execute(
+        """
+        UPDATE chat_intake_ledger
+        SET processing_state = ?, processed_at = ?, last_error = ''
+        WHERE ingest_key = ?
+        """,
+        (ChatIntakeState.PROCESSED.value, finished_at, ingest_key),
+    )
+    conn.commit()
+
+
+def observe_document_surface(
+    conn: sqlite3.Connection,
+    *,
+    record_type: DocumentRecordType,
+    source_id: str,
+    document_token: str,
+    source_stream_id: str,
+    source_item_id: str,
+    content_hash: str,
+    normalized_text: str,
+    payload: dict[str, Any],
+    intake_path: IntakePath,
+    parent_item_id: str = "",
+    revision_id: str = "",
+    lifecycle_state: DocumentLifecycleState = DocumentLifecycleState.ACTIVE,
+    canonical_link: str = "",
+    observed_at: str | None = None,
+    coalesce_window_seconds: int = 60,
+) -> DocumentIntakeItem:
+    """Observe a revision-bearing document surface through the mixed poll/event ledger."""
+
+    ingest_key = document_ingest_key(source_id, record_type, source_stream_id, source_item_id)
+    seen_at = observed_at or _utcnow_iso()
+    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    existing = get_document_intake_item(conn, ingest_key)
+
+    if existing is None:
+        poll_seen_count = 1 if intake_path is IntakePath.POLL else 0
+        event_seen_count = 1 if intake_path is IntakePath.EVENT else 0
+        coalesce_until = (
+            None
+            if intake_path is IntakePath.POLL
+            else _add_seconds(seen_at, coalesce_window_seconds)
+        )
+        conn.execute(
+            """
+            INSERT INTO document_intake_ledger (
+                ingest_key, record_type, source_id, document_token, source_stream_id,
+                source_item_id, parent_item_id, revision_id, lifecycle_state,
+                content_hash, normalized_text, payload_json, canonical_link,
+                first_seen_at, last_seen_at, first_intake_path, last_intake_path,
+                poll_seen_count, event_seen_count, coalesce_until, processing_state,
+                processed_at, last_error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ingest_key,
+                record_type.value,
+                source_id,
+                document_token,
+                source_stream_id,
+                source_item_id,
+                parent_item_id,
+                revision_id,
+                lifecycle_state.value,
+                content_hash,
+                normalized_text,
+                payload_json,
+                canonical_link,
+                seen_at,
+                seen_at,
+                intake_path.value,
+                intake_path.value,
+                poll_seen_count,
+                event_seen_count,
+                coalesce_until,
+                ChatIntakeState.PENDING.value,
+                None,
+                "",
+            ),
+        )
+        conn.commit()
+        return get_document_intake_item(conn, ingest_key) or DocumentIntakeItem(
+            ingest_key=ingest_key,
+            record_type=record_type,
+            source_id=source_id,
+            document_token=document_token,
+            source_stream_id=source_stream_id,
+            source_item_id=source_item_id,
+            parent_item_id=parent_item_id,
+            revision_id=revision_id,
+            lifecycle_state=lifecycle_state,
+            content_hash=content_hash,
+            normalized_text=normalized_text,
+            payload=payload,
+            canonical_link=canonical_link,
+            first_seen_at=seen_at,
+            last_seen_at=seen_at,
+            first_intake_path=intake_path,
+            last_intake_path=intake_path,
+            poll_seen_count=poll_seen_count,
+            event_seen_count=event_seen_count,
+            coalesce_until=coalesce_until,
+        )
+
+    substantive = (
+        existing.content_hash != content_hash
+        or existing.revision_id != revision_id
+        or existing.lifecycle_state != lifecycle_state
+        or existing.normalized_text != normalized_text
+    )
+
+    if existing.processing_state is ChatIntakeState.PROCESSED and not substantive:
+        conn.execute(
+            """
+            UPDATE document_intake_ledger SET
+                payload_json = ?,
+                last_seen_at = ?,
+                last_intake_path = ?,
+                poll_seen_count = ?,
+                event_seen_count = ?
+            WHERE ingest_key = ?
+            """,
+            (
+                payload_json,
+                seen_at,
+                intake_path.value,
+                existing.poll_seen_count + int(intake_path is IntakePath.POLL),
+                existing.event_seen_count + int(intake_path is IntakePath.EVENT),
+                ingest_key,
+            ),
+        )
+        conn.commit()
+        updated = get_document_intake_item(conn, ingest_key)
+        if updated is None:
+            raise RuntimeError(f"document intake row disappeared for ingest_key={ingest_key}")
+        return updated
+
+    coalesce_until = existing.coalesce_until
+    processing_state = ChatIntakeState.PENDING.value
+    processed_at: str | None = None
+
+    if existing.processing_state is ChatIntakeState.PENDING:
+        if intake_path is IntakePath.POLL:
+            coalesce_until = seen_at
+        elif existing.poll_seen_count == 0:
+            next_window = _add_seconds(seen_at, coalesce_window_seconds)
+            coalesce_until = _max_timestamp(existing.coalesce_until, next_window)
+    elif substantive:
+        if intake_path is IntakePath.POLL:
+            coalesce_until = seen_at
+        else:
+            coalesce_until = _add_seconds(seen_at, coalesce_window_seconds)
+
+    conn.execute(
+        """
+        UPDATE document_intake_ledger SET
+            parent_item_id = ?,
+            revision_id = ?,
+            lifecycle_state = ?,
+            content_hash = ?,
+            normalized_text = ?,
+            payload_json = ?,
+            canonical_link = ?,
+            last_seen_at = ?,
+            last_intake_path = ?,
+            poll_seen_count = ?,
+            event_seen_count = ?,
+            coalesce_until = ?,
+            processing_state = ?,
+            processed_at = ?,
+            last_error = ''
+        WHERE ingest_key = ?
+        """,
+        (
+            parent_item_id,
+            revision_id,
+            lifecycle_state.value,
+            content_hash,
+            normalized_text,
+            payload_json,
+            canonical_link,
+            seen_at,
+            intake_path.value,
+            existing.poll_seen_count + int(intake_path is IntakePath.POLL),
+            existing.event_seen_count + int(intake_path is IntakePath.EVENT),
+            coalesce_until,
+            processing_state,
+            processed_at,
+            ingest_key,
+        ),
+    )
+    conn.commit()
+    updated = get_document_intake_item(conn, ingest_key)
+    if updated is None:
+        raise RuntimeError(f"document intake row disappeared for ingest_key={ingest_key}")
+    return updated
+
+
+def get_document_intake_item(
+    conn: sqlite3.Connection, ingest_key: str
+) -> DocumentIntakeItem | None:
+    """Fetch one document-intake ledger row by its ingest key."""
+
+    row = conn.execute(
+        "SELECT * FROM document_intake_ledger WHERE ingest_key = ?",
+        (ingest_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    return DocumentIntakeItem.from_db_row(dict(row))
+
+
+def list_ready_document_intake(
+    conn: sqlite3.Connection,
+    *,
+    as_of: str | None = None,
+    limit: int = 100,
+) -> list[DocumentIntakeItem]:
+    """Return pending document-intake rows whose coalescing window has expired."""
+
+    ready_at = as_of or _utcnow_iso()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM document_intake_ledger
+        WHERE processing_state = ?
+          AND (coalesce_until IS NULL OR coalesce_until <= ?)
+        ORDER BY first_seen_at ASC
+        LIMIT ?
+        """,
+        (ChatIntakeState.PENDING.value, ready_at, limit),
+    ).fetchall()
+    return [DocumentIntakeItem.from_db_row(dict(row)) for row in rows]
+
+
+def mark_document_intake_processed(
+    conn: sqlite3.Connection,
+    ingest_key: str,
+    *,
+    processed_at: str | None = None,
+) -> None:
+    """Mark a document-intake row as processed after raw capture succeeds."""
+
+    finished_at = processed_at or _utcnow_iso()
+    conn.execute(
+        """
+        UPDATE document_intake_ledger
+        SET processing_state = ?, processed_at = ?, last_error = ''
+        WHERE ingest_key = ?
+        """,
+        (ChatIntakeState.PROCESSED.value, finished_at, ingest_key),
+    )
+    conn.commit()
+
+
+def _parse_iso_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _add_seconds(value: str, seconds: int) -> str:
+    return (_parse_iso_timestamp(value) + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _max_timestamp(left: str | None, right: str | None) -> str | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left if _parse_iso_timestamp(left) >= _parse_iso_timestamp(right) else right
 
 
 # ---------------------------------------------------------------------------

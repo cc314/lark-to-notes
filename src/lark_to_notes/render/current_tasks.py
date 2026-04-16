@@ -60,6 +60,17 @@ _STATUS_CHECKBOX: dict[str, str] = {
 }
 
 
+def _eligible_for_current_tasks(item: RenderItem) -> bool:
+    """Return whether *item* belongs in Current Tasks by default."""
+    if item.promotion_rec != "current_tasks":
+        return False
+    # Keep uncertain candidates in the review lane unless an explicit
+    # override changes their lifecycle state.
+    if item.status == "needs_review":
+        return False
+    return item.task_class != "needs_review"
+
+
 def _ct_block_id(item: RenderItem) -> str:
     return f"{_CT_BLOCK_ID_PREFIX}{item.fingerprint}"
 
@@ -128,6 +139,14 @@ def render_current_tasks_item(
             "promotion_rec": item.promotion_rec,
         },
     )
+    if not _eligible_for_current_tasks(item):
+        return RenderResult(
+            surface=RenderSurface.CURRENT_TASKS,
+            outcome=RenderOutcome.SKIPPED,
+            target_path=str(ct_path),
+            block_id=block_id,
+            entity_id=item.task_id,
+        )
 
     try:
         if ct_path.exists():
@@ -198,10 +217,10 @@ def render_current_tasks(
 ) -> list[RenderResult]:
     """Render all *items* into the Current Tasks note as a batch.
 
-    This is the primary entry point for full-list renders.  Only items
-    with ``promotion_rec == "current_tasks"`` are written; others are
-    skipped (their blocks are left in place, which is safe — they can be
-    cleaned up by calling :func:`remove_demoted_blocks` separately).
+    This is the primary entry point for full-list renders. Only items
+    eligible for Current Tasks are written; others are skipped (their
+    blocks are left in place, which is safe — they can be cleaned up by
+    calling :func:`remove_demoted_blocks` separately).
 
     Args:
         items:      Full list of items to consider.
@@ -212,7 +231,7 @@ def render_current_tasks(
     """
     results: list[RenderResult] = []
     for item in items:
-        if item.promotion_rec != "current_tasks":
+        if not _eligible_for_current_tasks(item):
             results.append(
                 RenderResult(
                     surface=RenderSurface.CURRENT_TASKS,

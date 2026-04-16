@@ -5,7 +5,8 @@ Coverage:
  - raw: render_raw_note — create/update/skip/fail, frontmatter, body block, user content preserved
  - daily: render_daily_note — create/update/skip/fail, bullet variants, section header injection
  - current_tasks: render_current_tasks_item, render_current_tasks (batch), remove_demoted_blocks
- - writer: NoteWriter pipeline, surface dispatch, path propagation, FAILED path not propagated
+ - writer: NoteWriter pipeline, surface dispatch, path propagation, FAILED path not propagated,
+   incremental rerender + promotion escalation preserving user-authored tails
 """
 
 from __future__ import annotations
@@ -546,6 +547,15 @@ class TestRenderCurrentTasksItem:
         result = render_current_tasks_item(item, tmp_path)
         assert result.block_id == "ltn-ct-cafe0000deadbeef"
 
+    def test_needs_review_status_is_skipped_even_with_current_tasks_promotion(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        item = _item(status="needs_review", promotion_rec="current_tasks")
+        result = render_current_tasks_item(item, tmp_path)
+        assert result.outcome == RenderOutcome.SKIPPED
+        assert not (tmp_path / "area" / "current tasks" / "index.md").exists()
+
 
 class TestRenderCurrentTasksBatch:
     def test_items_with_wrong_promotion_rec_skipped(self, tmp_path: Path) -> None:
@@ -577,6 +587,27 @@ class TestRenderCurrentTasksBatch:
             r for r in results if r.entity_id != "task-0001" or r.outcome != RenderOutcome.SKIPPED
         )
         assert eligible_result.outcome in (RenderOutcome.CREATED, RenderOutcome.UPDATED)
+
+    def test_needs_review_items_stay_out_of_current_tasks_by_default(self, tmp_path: Path) -> None:
+        items = [
+            _item(
+                fingerprint="aaa0000000000001",
+                promotion_rec="current_tasks",
+                status="needs_review",
+                task_class="needs_review",
+                title="Needs human triage",
+            ),
+            _item(
+                fingerprint="bbb0000000000002",
+                promotion_rec="review",
+                status="needs_review",
+                task_class="needs_review",
+                title="Another uncertain item",
+            ),
+        ]
+        results = render_current_tasks(items, tmp_path)
+        assert all(r.outcome == RenderOutcome.SKIPPED for r in results)
+        assert not (tmp_path / "area" / "current tasks" / "index.md").exists()
 
 
 class TestRemoveDemotedBlocks:
@@ -724,6 +755,86 @@ class TestNoteWriterPipeline:
         assert results[0].surface == RenderSurface.RAW
         assert results[1].surface == RenderSurface.DAILY
         assert results[2].surface == RenderSurface.CURRENT_TASKS
+
+    def test_incremental_pipeline_rerender_preserves_user_notes_all_surfaces(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Live-style second pass after human edits outside ltn blocks must keep those tails."""
+        writer = NoteWriter(vault_root=tmp_path)
+        fp = "liveincr00000001"
+        item = _item(
+            task_id="task-live-1",
+            fingerprint=fp,
+            promotion_rec="current_tasks",
+            event_date="2024-08-01",
+        )
+        first = writer.render_pipeline(item)
+        raw_p = Path(next(r.target_path for r in first if r.surface == RenderSurface.RAW))
+        daily_p = Path(next(r.target_path for r in first if r.surface == RenderSurface.DAILY))
+        ct_p = Path(next(r.target_path for r in first if r.surface == RenderSurface.CURRENT_TASKS))
+
+        raw_p.write_text(raw_p.read_text() + "\n\n## Human\n\nraw-user-KEEP\n")
+        daily_p.write_text(daily_p.read_text() + "\n\n## Notes\n\ndaily-user-KEEP\n")
+        ct_p.write_text(ct_p.read_text() + "\n\n## CT notes\n\nct-user-KEEP\n")
+
+        item2 = _item(
+            task_id="task-live-1",
+            fingerprint=fp,
+            promotion_rec="current_tasks",
+            event_date="2024-08-01",
+            summary="Summary changed on rerender for live visibility.",
+        )
+        second = writer.render_pipeline(item2)
+
+        raw_text = raw_p.read_text()
+        daily_text = daily_p.read_text()
+        ct_text = ct_p.read_text()
+        assert "raw-user-KEEP" in raw_text
+        assert "daily-user-KEEP" in daily_text
+        assert "ct-user-KEEP" in ct_text
+        bid_raw = f"ltn-raw-{fp}"
+        bid_daily = f"ltn-daily-{fp}"
+        bid_ct = f"ltn-ct-{fp}"
+        assert make_begin_marker(bid_raw) in raw_text
+        assert make_begin_marker(bid_daily) in daily_text
+        assert make_begin_marker(bid_ct) in ct_text
+        assert any(r.outcome is RenderOutcome.UPDATED for r in second)
+
+    def test_promotion_escalation_to_current_tasks_preserves_prior_user_notes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """When promotion_rec widens to current_tasks, existing raw/daily tails survive."""
+        writer = NoteWriter(vault_root=tmp_path)
+        fp = "escal00000000001"
+        item_daily = _item(
+            task_id="task-esc-1",
+            fingerprint=fp,
+            promotion_rec="daily_only",
+            event_date="2024-09-10",
+        )
+        r1 = writer.render_pipeline(item_daily)
+        assert len(r1) == 2
+        raw_p = Path(r1[0].target_path)
+        daily_p = Path(r1[1].target_path)
+
+        raw_p.write_text(raw_p.read_text() + "\n\nHUMAN_RAW_TAIL_KEEP\n")
+        daily_p.write_text(daily_p.read_text() + "\n\nHUMAN_DAILY_TAIL_KEEP\n")
+
+        item_ct = _item(
+            task_id="task-esc-1",
+            fingerprint=fp,
+            promotion_rec="current_tasks",
+            event_date="2024-09-10",
+        )
+        r2 = writer.render_pipeline(item_ct)
+        assert len(r2) == 3
+        ct_p = Path(r2[2].target_path)
+        assert ct_p.exists()
+        assert "HUMAN_RAW_TAIL_KEEP" in raw_p.read_text()
+        assert "HUMAN_DAILY_TAIL_KEEP" in daily_p.read_text()
+        assert make_begin_marker(f"ltn-ct-{fp}") in ct_p.read_text()
 
 
 class TestNoteWriterSurfaceDispatch:

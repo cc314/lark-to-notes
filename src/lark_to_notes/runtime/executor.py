@@ -11,6 +11,13 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from lark_to_notes.intake.ledger import (
+    insert_raw_message,
+    list_ready_chat_intake,
+    mark_chat_intake_processed,
+    observe_chat_message,
+)
+from lark_to_notes.intake.models import ChatEventAction, ChatIntakeItem, IntakePath, RawMessage
 from lark_to_notes.runtime.lock import RuntimeLock
 from lark_to_notes.runtime.models import (
     BatchRunResult,
@@ -269,6 +276,100 @@ def run_background_runtime(
         items_failed=items_failed,
         queue_depth_peak=queue_depth_peak,
         run_ids=tuple(run_ids),
+    )
+
+
+def observe_and_drain_chat_message(
+    conn: sqlite3.Connection,
+    *,
+    message: RawMessage,
+    intake_path: IntakePath,
+    lock_path: Path,
+    observed_at: str | None = None,
+    coalesce_window_seconds: int = 60,
+    event_action: ChatEventAction = ChatEventAction.CREATE,
+    drain_as_of: str | None = None,
+    command: str = "chat-intake",
+    limit: int = 100,
+    retry_policy: RetryPolicy | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+    run_id: str | None = None,
+) -> tuple[ChatIntakeItem, BatchRunResult | None]:
+    """Observe one live chat message and drain any ready canonical rows.
+
+    This is the transport-facing bridge for mixed poll/event intake. Callers do
+    not need to orchestrate separate observe and drain steps; they can hand one
+    chat observation to this helper and let the canonical ledger decide whether
+    downstream raw capture should run immediately or wait for the coalescing
+    window.
+    """
+
+    observed = observe_chat_message(
+        conn,
+        message,
+        intake_path=intake_path,
+        observed_at=observed_at,
+        coalesce_window_seconds=coalesce_window_seconds,
+        event_action=event_action,
+    )
+    ready_at = drain_as_of or observed_at or observed.last_seen_at
+    if not list_ready_chat_intake(conn, as_of=ready_at, limit=1):
+        return observed, None
+    return (
+        observed,
+        drain_ready_chat_intake(
+            conn,
+            lock_path=lock_path,
+            command=command,
+            as_of=ready_at,
+            limit=limit,
+            retry_policy=retry_policy,
+            sleep_fn=sleep_fn,
+            run_id=run_id,
+        ),
+    )
+
+
+def drain_ready_chat_intake(
+    conn: sqlite3.Connection,
+    *,
+    lock_path: Path,
+    command: str = "chat-intake",
+    as_of: str | None = None,
+    limit: int = 100,
+    retry_policy: RetryPolicy | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+    run_id: str | None = None,
+) -> BatchRunResult:
+    """Drain ready mixed-intake chat rows into the canonical raw ledger."""
+
+    ready_items = tuple(list_ready_chat_intake(conn, as_of=as_of, limit=limit))
+    work_items = tuple(
+        RuntimeWorkItem(
+            source_id=item.source_id,
+            item_key=item.ingest_key,
+            raw_message_id=item.message_id,
+            payload=item,
+        )
+        for item in ready_items
+    )
+
+    def processor(work_item: RuntimeWorkItem) -> None:
+        payload = work_item.payload
+        if not isinstance(payload, ChatIntakeItem):
+            raise TypeError("chat intake drain expected ChatIntakeItem payloads")
+        insert_raw_message(conn, payload.to_raw_message())
+        mark_chat_intake_processed(conn, payload.ingest_key, processed_at=as_of)
+
+    return execute_work_batch(
+        conn,
+        command=command,
+        items=work_items,
+        processor=processor,
+        lock_path=lock_path,
+        retry_policy=retry_policy,
+        sleep_fn=sleep_fn,
+        run_id=run_id,
     )
 
 

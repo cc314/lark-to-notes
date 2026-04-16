@@ -366,6 +366,20 @@ def health_report(
     queue = tuple(queued_items or ())
     queue_depth = len(queue)
     lag_seconds = _lag_seconds(queue, now=now)
+    row_duplicates = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN (poll_seen_count + event_seen_count) > 1 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE
+                WHEN (poll_seen_count + event_seen_count) > 1
+                THEN (poll_seen_count + event_seen_count - 1)
+                ELSE 0
+            END), 0)
+        FROM chat_intake_ledger
+        """
+    ).fetchone()
+    repeated_item_count = int(row_duplicates[0]) if row_duplicates else 0
+    duplicate_event_count = int(row_duplicates[1]) if row_duplicates else 0
 
     return HealthReport(
         run_count_total=run_count_total,
@@ -378,6 +392,8 @@ def health_report(
         last_run_command=last_run_command,
         last_run_status=last_run_status,
         lag_seconds=lag_seconds,
+        repeated_item_count=repeated_item_count,
+        duplicate_event_count=duplicate_event_count,
     )
 
 
