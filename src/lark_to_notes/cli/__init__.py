@@ -1380,7 +1380,7 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
     init_db(conn)
     chat_id_override: str | None = args.chat_id
     coalesce_window_seconds: int = int(args.coalesce_window_seconds)
-    json_objects, ingested = ingest_chat_event_ndjson_lines(
+    json_objects, ingested, reaction_rows_inserted = ingest_chat_event_ndjson_lines(
         conn,
         sys.stdin,
         source_id=str(args.source_id),
@@ -1406,6 +1406,7 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
         "source_id": str(args.source_id),
         "json_objects": json_objects,
         "envelopes_ingested": ingested,
+        "reaction_rows_inserted": reaction_rows_inserted,
         "chat_intake_drained": drain_processed,
         "drain_skipped": bool(args.no_drain),
         "runtime": asdict(health_report(conn)),
@@ -1427,6 +1428,7 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
         print(f"source_id: {payload['source_id']}")
         print(
             f"json_objects: {json_objects}  envelopes_ingested: {ingested}  "
+            f"reaction_rows_inserted: {reaction_rows_inserted}  "
             f"chat_intake_drained: {drain_processed}  drain_skipped: {payload['drain_skipped']}"
         )
     return 0

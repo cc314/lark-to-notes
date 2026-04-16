@@ -30,6 +30,16 @@ from lark_to_notes.live.lark_cli import (
     run_lark_cli_json,
     run_lark_cli_json_retryable,
 )
+from lark_to_notes.live.reaction_envelope_validation import (
+    reaction_envelope_is_valid,
+    reaction_envelope_validation_errors,
+)
+from lark_to_notes.live.reaction_envelopes import (
+    ReactionEnvelopeValidation,
+    im_message_reaction_event_types,
+    is_im_message_reaction_event_type,
+    validate_im_message_reaction_envelope,
+)
 from lark_to_notes.live.worker_config import (
     LiveWorkerConfigError,
     LiveWorkerConfigSnapshot,
@@ -46,16 +56,22 @@ __all__ = [
     "LarkCliNotFoundError",
     "LiveWorkerConfigError",
     "LiveWorkerConfigSnapshot",
+    "ReactionEnvelopeValidation",
     "event_type_from_envelope",
     "extract_im_message_from_envelope",
+    "im_message_reaction_event_types",
     "ingest_chat_event_ndjson_lines",
     "ingest_chat_records",
     "ingest_receive_message_v1_envelope",
+    "is_im_message_reaction_event_type",
     "iter_chat_event_envelopes_from_ndjson",
     "load_live_worker_config",
     "parse_live_worker_config_mapping",
     "poll_document_surfaces_to_ledger",
+    "reaction_envelope_is_valid",
+    "reaction_envelope_validation_errors",
     "resolve_lark_cli_binary",
     "run_lark_cli_json",
     "run_lark_cli_json_retryable",
+    "validate_im_message_reaction_envelope",
 ]

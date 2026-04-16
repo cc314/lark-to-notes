@@ -15,7 +15,13 @@ from typing import TYPE_CHECKING, Any
 
 from lark_to_notes.intake.ledger import observe_chat_message
 from lark_to_notes.intake.models import ChatIntakeItem, IntakePath
+from lark_to_notes.intake.reaction_model import parse_reaction_envelope
+from lark_to_notes.intake.reaction_store import insert_message_reaction_event
 from lark_to_notes.live.chat_live import raw_message_from_lark_im_api
+from lark_to_notes.live.reaction_envelopes import (
+    is_im_message_reaction_event_type,
+    validate_im_message_reaction_envelope,
+)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -117,17 +123,20 @@ def ingest_chat_event_ndjson_lines(
     observed_at: str | None = None,
     coalesce_window_seconds: int = 60,
     chat_id_override: str | None = None,
-) -> tuple[int, int]:
-    """Ingest each NDJSON line that is a handled ``im.message.receive_v1`` envelope.
+) -> tuple[int, int, int]:
+    """Ingest NDJSON lines for chat message events and IM reaction events.
 
-    Returns ``(json_objects, envelopes_ingested)`` where *json_objects* counts
-    lines that decoded to a JSON object (blank lines skipped) and
-    *envelopes_ingested* counts envelopes that produced a ledger observation
-    (including duplicates that update an existing row).
+    Returns ``(json_objects, chat_envelopes_ingested, reaction_rows_inserted)``
+    where *json_objects* counts lines that decoded to a JSON object (blank lines
+    skipped), *chat_envelopes_ingested* counts ``im.message.receive_v1``
+    envelopes that produced a chat-intake ledger observation, and
+    *reaction_rows_inserted* counts new rows appended to ``message_reaction_events``
+    (``INSERT OR IGNORE`` successes).
     """
 
     objects = 0
     ingested = 0
+    reactions_inserted = 0
     for envelope in iter_chat_event_envelopes_from_ndjson(lines):
         objects += 1
         item = ingest_receive_message_v1_envelope(
@@ -142,4 +151,21 @@ def ingest_chat_event_ndjson_lines(
         )
         if item is not None:
             ingested += 1
-    return objects, ingested
+            continue
+        et = event_type_from_envelope(envelope)
+        if not is_im_message_reaction_event_type(et):
+            continue
+        check = validate_im_message_reaction_envelope(envelope)
+        if not check.ok:
+            logger.info(
+                "reaction_envelope_rejected",
+                extra={"event_type": et, "errors": ",".join(check.errors)},
+            )
+            continue
+        rev = parse_reaction_envelope(envelope, source_id=source_id)
+        if rev is None:
+            continue
+        res = insert_message_reaction_event(conn, rev)
+        if res.inserted:
+            reactions_inserted += 1
+    return objects, ingested, reactions_inserted

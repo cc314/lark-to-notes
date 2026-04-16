@@ -81,7 +81,7 @@ def test_ingest_chat_event_ndjson_lines_counts_and_skips_garbage() -> None:
         json.dumps(_receive_v1_envelope(message_id="om_a")),
         json.dumps({"header": {"event_type": "im.message.receive_v1"}, "event": {}}),
     ]
-    objs, ingested = ingest_chat_event_ndjson_lines(
+    objs, ingested, rx = ingest_chat_event_ndjson_lines(
         conn,
         lines,
         source_id="dm:ou_demo",
@@ -91,6 +91,57 @@ def test_ingest_chat_event_ndjson_lines_counts_and_skips_garbage() -> None:
     )
     assert objs == 2
     assert ingested == 1
+    assert rx == 0
+
+
+def test_ingest_chat_event_ndjson_lines_skips_invalid_reaction_envelope() -> None:
+    conn = _conn()
+    bad = {
+        "header": {"event_type": "im.message.reaction.created_v1", "event_id": "rx-bad"},
+        "event": {"message_id": "om_z"},
+    }
+    objs, ingested, rx = ingest_chat_event_ndjson_lines(
+        conn,
+        [json.dumps(bad)],
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+    )
+    assert objs == 1
+    assert ingested == 0
+    assert rx == 0
+
+
+def test_ingest_chat_event_ndjson_lines_inserts_reaction_event() -> None:
+    conn = _conn()
+    react = {
+        "header": {"event_type": "im.message.reaction.created_v1", "event_id": "rx-e2e-1"},
+        "event": {
+            "message_id": "om_rx_1",
+            "reaction_type": {"emoji_type": "THUMBSUP"},
+            "operator_type": "user",
+            "user_id": {"open_id": "ou_x"},
+            "action_time": "1",
+        },
+    }
+    lines = [json.dumps(react)]
+    objs, ingested, rx = ingest_chat_event_ndjson_lines(
+        conn,
+        lines,
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+    )
+    assert objs == 1
+    assert ingested == 0
+    assert rx == 1
+    row = conn.execute(
+        "SELECT message_id, reaction_kind FROM message_reaction_events WHERE reaction_event_id = ?",
+        ("rx-e2e-1",),
+    ).fetchone()
+    assert row is not None
+    assert row["message_id"] == "om_rx_1"
+    assert row["reaction_kind"] == "add"
 
 
 def test_iter_chat_event_envelopes_from_ndjson_yields_objects() -> None:
