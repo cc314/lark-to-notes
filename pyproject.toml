@@ -58,6 +58,7 @@ ignore = [
 "src/lark_to_notes/storage/db.py" = ["TCH003"]
 "src/lark_to_notes/intake/ledger.py" = ["TCH003"]
 "src/lark_to_notes/intake/replay.py" = ["TCH003"]
+"src/lark_to_notes/intake/reaction_store.py" = ["TCH001", "TCH003"]
 "src/lark_to_notes/render/models.py" = ["TCH003"]
 "src/lark_to_notes/render/writer.py" = ["TCH003"]
 "src/lark_to_notes/runtime/lock.py" = ["TCH003"]
