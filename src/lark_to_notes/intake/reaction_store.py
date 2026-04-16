@@ -14,6 +14,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Literal
 
+from lark_to_notes.intake.ledger import chat_ingest_key
 from lark_to_notes.intake.reaction_model import NormalizedReactionEvent
 
 ReactionIntakePath = Literal["event", "poll", "backfill"]
@@ -25,6 +26,36 @@ class ReactionInsertResult:
 
     reaction_event_id: str
     inserted: bool
+    chat_ingest_fingerprint: str
+    raw_message_present: bool
+
+
+def reaction_correlation_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Count reaction rows versus rows in ``raw_messages`` for the same chat pair.
+
+    **Linked** means a ``raw_messages`` row exists with the same ``message_id``
+    and ``source_id`` as the reaction row (matches :func:`insert_message_reaction_event`
+    presence detection). **Orphan** is ``total - linked`` (reconcile / backfill may
+    change linkage over time even if ``raw_message_present`` was snapshotted at insert).
+    """
+
+    total_row = conn.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()
+    total = int(total_row["c"] if total_row is not None else 0)
+    linked_row = conn.execute(
+        """
+        SELECT COUNT(*) AS c FROM message_reaction_events r
+        WHERE EXISTS (
+            SELECT 1 FROM raw_messages m
+            WHERE m.message_id = r.message_id AND m.source_id = r.source_id
+        )
+        """
+    ).fetchone()
+    linked = int(linked_row["c"] if linked_row is not None else 0)
+    return {
+        "total": total,
+        "linked_to_raw_message": linked,
+        "orphan": max(0, total - linked),
+    }
 
 
 def surrogate_reaction_event_id(event: NormalizedReactionEvent) -> str:
@@ -79,14 +110,21 @@ def insert_message_reaction_event(
         row was stored.
     """
     rid = canonical_reaction_event_id(event)
+    ingest_fp = chat_ingest_key(event.source_id, event.message_id)
+    raw_hit = conn.execute(
+        "SELECT 1 FROM raw_messages WHERE message_id = ? AND source_id = ? LIMIT 1",
+        (event.message_id, event.source_id),
+    ).fetchone()
+    raw_present = 1 if raw_hit is not None else 0
     cur = conn.execute(
         """
         INSERT OR IGNORE INTO message_reaction_events (
             reaction_event_id, source_id, message_id, reaction_kind, emoji_type,
             operator_type, operator_open_id, operator_user_id, operator_union_id,
-            action_time, intake_path, payload_json, governance_version, policy_version
+            action_time, intake_path, payload_json, governance_version, policy_version,
+            chat_ingest_fingerprint, raw_message_present
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '')
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?)
         """,
         (
             rid,
@@ -101,7 +139,14 @@ def insert_message_reaction_event(
             event.action_time,
             intake_path,
             event.payload_json(),
+            ingest_fp,
+            raw_present,
         ),
     )
     conn.commit()
-    return ReactionInsertResult(reaction_event_id=rid, inserted=cur.rowcount == 1)
+    return ReactionInsertResult(
+        reaction_event_id=rid,
+        inserted=cur.rowcount == 1,
+        chat_ingest_fingerprint=ingest_fp,
+        raw_message_present=raw_present == 1,
+    )

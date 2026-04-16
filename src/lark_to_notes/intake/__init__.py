@@ -43,6 +43,7 @@ from lark_to_notes.intake.reaction_store import (
     ReactionInsertResult,
     canonical_reaction_event_id,
     insert_message_reaction_event,
+    reaction_correlation_counts,
     surrogate_reaction_event_id,
 )
 
@@ -78,6 +79,7 @@ __all__ = [
     "observe_chat_message",
     "observe_document_surface",
     "parse_reaction_envelope",
+    "reaction_correlation_counts",
     "reaction_event_id_from_envelope",
     "reaction_event_type",
     "start_intake_run",

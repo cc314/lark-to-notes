@@ -472,6 +472,7 @@ def _handle_replay(args: argparse.Namespace) -> int:
 
 def _handle_doctor(args: argparse.Namespace) -> int:
     from lark_to_notes.intake.ledger import chat_intake_ledger_counts
+    from lark_to_notes.intake.reaction_store import reaction_correlation_counts
     from lark_to_notes.runtime.models import RunStatus
     from lark_to_notes.runtime.registry import health_report, list_dead_letters, list_runs
     from lark_to_notes.runtime.supervised import supervised_live_hints
@@ -509,10 +510,10 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     ]
     supervised_live = supervised_live_hints(db_path=runtime_db_path)
     chat_intake = chat_intake_ledger_counts(runtime_conn)
-    rx_row = runtime_conn.execute(
-        "SELECT COUNT(*) AS c FROM message_reaction_events"
-    ).fetchone()
-    reaction_event_row_count = int(rx_row["c"] if rx_row is not None else 0)
+    rx = reaction_correlation_counts(runtime_conn)
+    reaction_event_row_count = rx["total"]
+    reaction_orphan_row_count = rx["orphan"]
+    reaction_linked_row_count = rx["linked_to_raw_message"]
     payload = {
         "status": "ok" if replay_summary.total_records == corpus.record_count else "error",
         "schema_version": SCHEMA_VERSION,
@@ -538,7 +539,11 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "recent_dead_letters": dead_letters,
         },
         "chat_intake_ledger": chat_intake,
-        "message_reaction_events": {"row_count": reaction_event_row_count},
+        "message_reaction_events": {
+            "row_count": reaction_event_row_count,
+            "orphan_row_count": reaction_orphan_row_count,
+            "linked_row_count": reaction_linked_row_count,
+        },
         "supervised_live": supervised_live,
     }
     if args.json:
@@ -574,7 +579,11 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             f"{chat_intake['pending_coalescing']} coalescing), "
             f"{chat_intake['processed']} processed"
         )
-        print(f"reaction_events: {reaction_event_row_count} row(s)")
+        print(
+            "reaction_events: "
+            f"{reaction_event_row_count} row(s) "
+            f"({reaction_orphan_row_count} orphan, {reaction_linked_row_count} linked)"
+        )
         print(
             f"supervised_live: {supervised_live['model']} (see `doctor --json` key supervised_live)"
         )

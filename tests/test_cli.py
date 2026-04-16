@@ -1468,7 +1468,10 @@ def test_doctor_json_has_all_expected_keys(
         assert key in payload["runtime_diagnostics"], f"missing runtime_diagnostics key: {key!r}"
     for key in ("pending_ready", "pending_coalescing", "processed"):
         assert key in payload["chat_intake_ledger"], f"missing chat_intake_ledger key: {key!r}"
-    assert payload["message_reaction_events"]["row_count"] == 0
+    mrx = payload["message_reaction_events"]
+    assert mrx["row_count"] == 0
+    assert mrx["orphan_row_count"] == 0
+    assert mrx["linked_row_count"] == 0
 
 
 def test_doctor_human_readable_output(

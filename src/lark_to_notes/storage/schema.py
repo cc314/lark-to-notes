@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -385,6 +385,25 @@ CREATE INDEX IF NOT EXISTS idx_message_reaction_action_time
     ON message_reaction_events (source_id, action_time);
 """
 
+# ---------------------------------------------------------------------------
+# Version 10 — reaction ↔ chat correlation (ingest fingerprint + raw presence)
+# ---------------------------------------------------------------------------
+#
+# ``chat_ingest_fingerprint`` matches :func:`lark_to_notes.intake.ledger.chat_ingest_key`
+# for the same ``(source_id, message_id)`` so reactions join the mixed chat ledger
+# namespace without minting alternate identities.
+#
+# ``raw_message_present`` is ``1`` when a ``raw_messages`` row exists for the pair at
+# insert time; ``0`` means orphan / not yet captured (see lw-pzj.15 for backlog).
+
+_V10_DDL = """
+ALTER TABLE message_reaction_events ADD COLUMN chat_ingest_fingerprint TEXT NOT NULL DEFAULT '';
+ALTER TABLE message_reaction_events ADD COLUMN raw_message_present INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS idx_message_reaction_chat_ingest_fp
+    ON message_reaction_events (chat_ingest_fingerprint);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
@@ -395,6 +414,7 @@ _MIGRATIONS: dict[int, str] = {
     7: _V7_DDL,
     8: _V8_DDL,
     9: _V9_DDL,
+    10: _V10_DDL,
 }
 
 
