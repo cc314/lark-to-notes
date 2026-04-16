@@ -75,6 +75,29 @@ Important work arrives in Lark chats, docs, comments, and follow-ups, but it is 
 | LLM routing | Interface ready | Budgeting, cache, and fallback logic exist, but no provider implementation ships in-tree |
 | Mixed chat intake ledger | Implemented in-tree | Poll and `im.message.receive_v1` events converge on one canonical SQLite intake row with coalescing; pipe `lark-cli event +subscribe` NDJSON into `sync-events` |
 | Live sync/backfill | In-repo (`lark-cli`) | `sync-once`, `sync-daemon`, and `backfill` load the worker-style JSON config and run `lark_to_notes.live.chat_live.ChatLiveAdapter` into the canonical SQLite store (requires `lark-cli` and Lark auth) |
+| IM emoji reactions | Planned (beads `lw-pzj.*`) | Event types, schema, vault blocks, and distillation rules are specified in [`plan_for_lark_to_notes_workflow.md`](plan_for_lark_to_notes_workflow.md) (see **Message reaction ingestion** and the traceability matrix). `sync-events` today accepts only `im.message.receive_v1`; reaction envelopes are not ingested yet. |
+
+### IM reactions — privacy, retention, and semantics (operator defaults)
+
+These bullets summarize normative **policy** for the reaction epic; they intentionally stay short. Full requirements and code anchors are in the plan’s **Message reaction ingestion** section and traceability matrix.
+
+1. **Sensitive fields:** Treat operator identity fields inside reaction payloads (for example `open_id`, `user_id`, `union_id` when present) as **sensitive PII** for storage, logs, and vault text. Prefer **aggregates** (counts, emoji histograms) in rendered `raw/` notes unless an explicit, versioned configuration widens disclosure.
+2. **Retention / deletes:** A platform “reaction removed” event is stored as its own **append-only** row; the ledger does not pretend earlier adds never happened. Effective “who has reacted now?” state is always **derived** from ordered add/remove history or an equivalent deterministic summary.
+3. **Emoji meaning:** Heuristics stay **conservative**; politeness or ambiguous reacts must not silently promote work. Anything that can surface a **task without supporting message text** remains **opt-in**, default off, and must record **`policy_version`** when enabled.
+4. **Explicit non-goals (near term):** No cross-tenant reaction analytics, no automatic assignment of humans from emoji alone, no mutating Lark reactions from this tool, and no emoji sentiment models unless a dedicated future issue expands scope.
+
+### IM reactions — Lark scopes and capability matrix (operator checklist)
+
+Scopes and product behavior **vary by tenant** (especially whether a bot may sit in the target DM/group). Treat this table as the **default checklist** for Feishu/Lark IM reaction capture; adjust with your tenant admin when doctor or `lark-cli` reports `Permission denied`.
+
+| Goal | Typical event or call | Scopes / prerequisites | If missing |
+| --- | --- | --- | --- |
+| Receive chat message events | `im.message.receive_v1` on `lark-cli event +subscribe` | IM message read scopes as required by your app type (often **`im:message`**, **`im:message.group_at_msg`**, or tenant-specific bundles) | `sync-events` ingests nothing useful; doctor should surface “no permission” vs “no traffic”. |
+| Receive reaction create/delete | `im.message.reaction.created_v1`, `im.message.reaction.deleted_v1` (same NDJSON pipe) | **`im:message.reactions:read`** (name may differ slightly by platform version) plus the same chat membership constraints as messages | **Capability blocker:** do not assume an empty reaction table means “no reacts”; verify scope and bot placement. |
+| Historical reaction lists | REST / `lark-cli` message or reaction list APIs (backfill) | Same reaction read scopes; often **pagination** and stricter rate caps | Partial backfill is expected; operator docs must describe deferral (see plan §5). |
+| Bot-in-chat | All of the above | Bot user must be allowed in the chat; some orgs forbid bots in DMs | Documented **non-code** blocker; no amount of local SQLite work fixes missing membership. |
+
+**Machine-checkable direction:** keep the left column stable in docs; wire **doctor / preflight** (`lw-pzj.9.1`, `lw-pzj.14.3`) to emit explicit JSON keys for “missing scope”, “bot not in chat”, and “API not exposed for tenant” rather than collapsing to zero counts.
 
 ## Quick Example
 
@@ -157,7 +180,7 @@ The CLI exposes `doctor`, `reconcile`, runtime history, feedback events, and LLM
 | Manual copy/paste from Lark into notes | Full human judgment | High effort, inconsistent provenance, easy to miss follow-ups | Low volume, one-off capture |
 | One-shot LLM summarization | Fast for ad hoc review | Weak replay story, expensive at scale, no stable task identity | Disposable summaries |
 | Export scripts with no stateful DB | Easy to start | Hard to reconcile retries, edits, and feedback | Throwaway prototypes |
-| `lark-to-notes` | Replayable local store, safe rendering, feedback loop, budget hooks | Still a prototype; live sync is not self-contained in this repo | Operator-driven local workflow development |
+| `lark-to-notes` | Replayable local store, safe rendering, feedback loop, in-tree live chat polling via `lark-cli`, budget hooks | Still a prototype; document-side live parity and some plan-level contracts are not finished | Operator-driven local workflow development |
 
 ## Installation
 
@@ -194,7 +217,7 @@ Requirements:
 - Python `3.12+`
 - `uv`
 - a writable SQLite path and vault path
-- optional: a separate live worker environment if you want `sync-once`, `sync-daemon`, or `backfill`
+- for live commands (`sync-once`, `sync-daemon`, `backfill`, live `reconcile`): `lark-cli` installed and authenticated for your Lark tenant
 
 ## Quick Start
 
@@ -273,9 +296,11 @@ uv run pytest
 Notes on the live commands:
 
 - they are part of the CLI surface today
-- `sync-once`, `sync-daemon`, and `backfill` use the same JSON config shape as the historical worker, but run entirely in-tree via `ChatLiveAdapter`
+- `sync-once`, `sync-daemon`, `backfill`, and live `reconcile` read a JSON file with `vault_root`, `state_db`, `poll_interval_seconds`, `poll_lookback_days`, and `sources[]` (`lark_to_notes.live.worker_config`). **`--db` is the canonical SQLite store** (checkpoints, watched sources, intake ledgers, runtime runs). The `state_db` path in JSON is a **compatibility field** only; it is not merged as a second source of truth into `--db`.
+- `sync-once`, `sync-daemon`, and `backfill` run entirely in-tree via `ChatLiveAdapter` (`lark-cli` transport into the same pipeline as replay)
 - `sync-events` reads NDJSON from stdin; you normally pair it with `lark-cli event +subscribe` in a shell pipeline. By default it also **drains** ready rows from `chat_intake_ledger` into `raw_messages` under the same runtime lock as other writers: `{parent-of---db}/lark-to-notes.runtime.lock` (for example `var/lark-to-notes.runtime.lock` next to `var/lark-to-notes.db`). Pass `--no-drain` to only append ledger observations.
 - `sync-once`, `sync-daemon`, and `backfill` require a working `lark-cli` install and credentials with access to the configured sources; `sync-events` only needs stdin (often fed by `lark-cli` in another process)
+- operator smoke / CI: `uv run python scripts/verify_live_adapter.py` exercises `doctor` plus `sync-events` with structured stderr; add `--artifacts-dir` to retain `verify_live_steps.jsonl` for dashboards or failure triage (see `tests/test_integration_logging.py`)
 
 #### Live adapter validation matrix
 
@@ -288,20 +313,11 @@ Notes on the live commands:
 | Offline operator smoke (structured stderr steps + optional NDJSON artifact) | `uv run python scripts/verify_live_adapter.py` and `… --artifacts-dir /path/to/dir` (see `tests/test_integration_logging.py`) |
 | Full pipeline demo (no Lark credentials) | `uv run python scripts/integration_run.py` |
 
-### Migration from `automation/lark_worker`
-
-The MVP worker under `automation/lark_worker/` is **not** imported by this package. Operator migration is config + CLI only:
-
-- **Same JSON shape** for live commands: `vault_root`, `state_db`, `poll_interval_seconds`, `poll_lookback_days`, and `sources[]` are read by `lark_to_notes.live.worker_config` and drive `ChatLiveAdapter` (`sync-once`, `sync-daemon`, `backfill`, live `reconcile`).
-- **Canonical state** lives in the SQLite path you pass as `--db` (checkpoints, watched sources, intake ledgers, runtime runs). The `state_db` field remains a **compatibility path** in shared configs; it is not merged as a second source of truth into `--db`.
-- **Events**: use `lark-cli event +subscribe …` piped to `sync-events` (see `contrib/sync-events-pipeline.example.sh`); that path shares the same `chat_intake_ledger` + drain semantics as polling.
-- **Smoke / CI**: `uv run python scripts/verify_live_adapter.py` exercises `doctor` + `sync-events` with structured stderr; add `--artifacts-dir` to retain `verify_live_steps.jsonl` for dashboards or failure triage.
-
 ### Background live operation (`sync-daemon`, reconcile, launchd)
 
 - **Ownership:** `sync-daemon` is a thin loop around the same in-repo stack as `sync-once` (`ChatLiveAdapter`, canonical `--db`, runtime lock under `{vault_root}/var/lark-to-notes.runtime.lock`). There is no separate Python “worker” process contract inside this repo—supervisors should invoke the published CLI.
 - **macOS:** see `scripts/macos/launchd/com.lark-to-notes.sync-daemon.example.plist` for a LaunchAgent template (`ProgramArguments` runs `uv run lark-to-notes sync-daemon …` from a fixed working directory). Edit placeholders before `launchctl load`.
-- **Reconcile:** `reconcile --config …` loads the same worker-style JSON for `vault_root`, `state_db`, and `sources[]`. Live truth for gap detection comes from `ChatLiveAdapter.collect_live_source_states` (lark-cli peek), not from importing `automation.lark_worker`. Repair runs `_worker_poll_once` (same poll path as live sync). Checkpoints and watched sources are written only into `--db`; the JSON `state_db` path remains a compatibility field for shared configs, not a second source of truth merged into the canonical DB.
+- **Reconcile:** `reconcile --config …` loads the same JSON shape for `vault_root`, `state_db`, and `sources[]`. Live truth for gap detection comes from `ChatLiveAdapter.collect_live_source_states` (`lark-cli` peek). Repair uses the same in-repo poll path as `sync-once`. Checkpoints and watched sources are written only into `--db`; the JSON `state_db` path is not merged as a second source of truth.
 
 ## Configuration
 
@@ -529,7 +545,7 @@ That is expected. The budget layer records fallbacks and cache hits too. The num
 
 ## Limitations
 
-- The self-contained, reliable path today is offline replay from JSONL, not live Lark polling.
+- The turnkey path without Lark credentials is offline replay from JSONL; live polling needs `lark-cli`, auth, and sources your app can access.
 - No LLM provider implementation ships in-tree, even though routing and budget hooks exist.
 - The current CLI render path does not yet create daily-note output end to end.
 - Live commands depend on `lark-cli` and real Lark access; the offline `replay` path remains the turnkey way to exercise the pipeline without credentials.

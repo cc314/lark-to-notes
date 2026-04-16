@@ -8,6 +8,7 @@ Important work and context arrive through Lark in multiple forms:
 
 - direct messages
 - group chats
+- message emoji reactions on IM messages (approval, acknowledgment, priority signals, and other conversational metadata)
 - documents
 - document comments
 
@@ -22,7 +23,7 @@ The workflow must do more than ingest content. It must also be trustworthy under
 ### Key Objectives
 
 1. Reduce manual effort in turning Lark content into useful notes.
-2. Capture important work items from DMs, groups, documents, and comments.
+2. Capture important work items from DMs, groups, documents, comments, and **reaction context** tied to those surfaces (especially IM), without losing provenance.
 3. Maintain a durable open-task view instead of leaving action items scattered across conversations.
 4. Accumulate durable knowledge in the notes vault over time.
 5. Improve workflow quality continuously through human feedback on the generated outputs.
@@ -76,6 +77,7 @@ The following defaults should be treated as implementation decisions for v1 unle
 1. In-scope sources are:
    - direct messages
    - group chats
+   - **IM message emoji reactions** (create and delete), as durable event-sourced context linked to `message_id`
    - Lark documents
    - comments on Lark documents
    - comment replies on watched documents when accessible
@@ -130,7 +132,7 @@ Canonical watched-source materialization:
    - `看下`
    - `看看`
 3. These patterns should remain configurable rather than hard-coded as the final truth.
-4. Useful task signals may also come from assignee cues, due-date cues, question forms, urgency markers, or repeated follow-up language.
+4. Useful task signals may also come from assignee cues, due-date cues, question forms, urgency markers, repeated follow-up language, or **IM reaction patterns** (for example repeated acknowledgment emoji, agreed markers, or configured per-tenant reaction-to-intent maps) when governed by explicit, versioned rules.
 5. Documents, comments, and replies are mutable. They may be edited or deleted after first capture and should therefore be treated as revision-bearing records rather than static text blobs.
 
 ### Vault Contract
@@ -163,7 +165,7 @@ Placement and naming:
 
 Surface-specific expectations:
 
-1. **Chat (DM and group):** raw notes carry message-level identity, canonical deep link, author, timestamps, intake path, and a short normalized excerpt; reply threads should nest or cross-link by stable parent keys without creating a second file per transient render pass.
+1. **Chat (DM and group):** raw notes carry message-level identity, canonical deep link, author, timestamps, intake path, and a short normalized excerpt; reply threads should nest or cross-link by stable parent keys without creating a second file per transient render pass. **Reactions** on a message are first-class context: durable reaction events in SQLite must project into the **same canonical message raw path** (or an explicitly linked companion artifact with stable binding) inside a **machine-owned, rerender-safe section** that summarizes current effective reactions (add/remove applied in order) without duplicating per-event shadow files.
 2. **Document, comment, reply:** raw notes distinguish `record_type` in frontmatter, include document token, comment or reply ID, revision when available, and lifecycle state; edits create superseding vault projections aligned with new raw rows, not in-place edits that erase prior captured text without a tombstone or supersession trail in the store.
 
 Metadata and backlinks:
@@ -417,6 +419,11 @@ The system shall:
 13. collect structured human feedback plus optional free-text comments
 14. measure and monitor LLM usage, quality, sync latency, and runtime health
 15. provide backfill, replay, reclassification, and reconciliation commands
+16. ingest **IM message reaction** create and delete events (`im.message.reaction.created_v1` and `im.message.reaction.deleted_v1` or platform-equivalent) with **idempotent** storage keyed by upstream **`event_id`**, preserving full payload for replay
+17. **backfill and reconcile** reaction history for messages already captured (via `lark-cli` or REST list-reactions paths when available), with explicit operator-visible **partial completion** when APIs, caps, or permissions block full history
+18. fold **reaction-derived signals** into deterministic distillation and routing under **versioned rules** (never silent magic defaults that mint tasks from emoji alone unless explicitly configured)
+19. **render** reaction summaries into vault `raw/` artifacts bound to the parent **`message_id`** (machine-owned blocks, stable IDs, idempotent rerender per the raw-first contract)
+20. treat reaction streams under the same **caps, quarantine, governance_version, and policy_version** explainability rules as other intake
 
 ### Source Governance
 
@@ -509,6 +516,8 @@ For traceability and replay, the system shall preserve at least:
 14. lifecycle state such as `active`, `edited`, `deleted`, or `superseded`
 15. capture time and intake path such as `poll` or `event`
 16. processing policy version or rules version
+17. for each **reaction event**: upstream `event_id`, `message_id`, `emoji_type`, reaction **kind** (`add` or `remove`), `operator_type`, operator identity fields returned by the platform (`open_id` / `user_id` / `union_id` as available), `action_time`, and raw reaction `payload_json`
+18. **effective reaction set** materialization inputs: ordered add/remove history or a derived summary hash so rerenders and content-hash skip behave deterministically
 
 ### Ingestion Contract
 
@@ -525,6 +534,50 @@ For traceability and replay, the system shall preserve at least:
 11. Incremental sync should process only new or changed records since the stored cursor or revision, while content-hash skip should suppress downstream reruns only when canonical content and lifecycle state are unchanged.
 12. Replay mode should be able to rebuild derived artifacts from raw capture plus stored stage state without mutating raw history or minting new canonical identities.
 13. Reclassification mode should allow rules or model-policy changes to rerun on stored raw records by updating later-stage state idempotently instead of reinserting raw rows or double-writing notes.
+
+### Message reaction ingestion (IM emoji reactions)
+
+This subsection makes **IM reactions** normative context, not an optional afterthought. It applies to watched **DM and group** streams where the configured Lark app can receive reaction telemetry (including **bot-in-chat** constraints on some platforms).
+
+1. **Canonical event types:** The implementation must accept **`im.message.reaction.created_v1`** and **`im.message.reaction.deleted_v1`** (Feishu/Lark naming) on the same operator event pipe used for `im.message.receive_v1` (for example NDJSON from `lark-cli event +subscribe` into `sync-events`-class intake). Unknown schema versions should still persist **`payload_json`** and structured parse errors should land in **quarantine** rather than stalling unrelated envelopes.
+2. **Idempotency:** Duplicate delivery is expected. **`header.event_id`** is the primary unique key; if absent, the implementation must use a **documented deterministic surrogate** (hash of tenant + message_id + emoji_type + action_time + operator + kind) and log a visible warning when surrogacy happens.
+3. **Append-only history:** Store each reaction event as its own durable row. **Deletes are events**, not silent erasure of prior adds. **Current effective reactions** for UI, heuristics, and vault summaries are derived by **ordered replay** of add/remove for `(source_id, message_id)` or by maintaining a **deterministic materialized summary** updated from that log—either way, replay from SQLite must reproduce the same effective set.
+4. **Linkage:** Every reaction row links to **`message_id`** and **`source_id`** (watched chat source). When the parent message is not yet in `raw_messages`, the system must still accept reactions (backlog) and **attach or reconcile** after the message arrives, without minting a second canonical identity for the message.
+5. **Polling and historical backfill:** Event streams alone miss pre-subscription history. The system shall implement **reaction backfill** using **`lark-cli` or REST** list-reactions (or message-get payloads that include reactions) when those calls exist and are permitted, subject to **per-run and per-source caps** with explicit deferral. When no API path exists for a tenant, **doctor** and operator docs must report a **capability blocker** rather than implying silent completeness.
+6. **Distillation and heuristics:** Versioned rules may consume **reaction aggregates** (counts, recency, configured emoji sets, streaks across thread) as **inputs** to `confidence_band`, `reason_code`, `promotion_rec`, or `needs_review` routing. Reactions must **not** override explicit dismissals or manual overrides. Any rule that can create a **task without message text** must be **opt-in in configuration**, default off, and audited in `policy_version`.
+7. **Vault raw projection:** Each chat message with a stable **`source_item_key` / `message_id`** must expose reactions in **`raw/`** under the same **raw-first** and **machine-owned block** rules as other chat artifacts: stable block IDs, idempotent rerender, backlinks to Lark where available, and **no duplicate path** per message for reaction-only updates.
+8. **Reconcile:** Reaction **vault drift** (missing section, stale summary vs event log) is repaired from SQLite **without re-fetching** when local data suffices; when upstream reconciliation is required, use the same repair staging and diagnostics as other chat surfaces.
+9. **Permissions and trust:** Operators must configure scopes such as **`im:message.reactions:read`** (and related IM read scopes) where required. Missing scope is a **blocker**, not a soft empty success.
+
+#### Traceability matrix: reaction ingestion (plan ↔ code ↔ tests)
+
+Maintainer map for **Message reaction ingestion** bullets above. **TBD** marks work tracked under beads `lw-pzj.*` but not yet merged. Current chat **event** plumbing only handles `im.message.receive_v1` (see “Canonical event types”); reaction envelopes share the same *class* of operator pipe (`lark-cli event +subscribe` → stdin) but are **not** parsed yet.
+
+| Plan obligation (subsection bullets) | Primary implementation anchor (today) | Acceptance / bead owner |
+| --- | --- | --- |
+| **1** Canonical `im.message.reaction.created_v1` / `deleted_v1` on the NDJSON pipe | **TBD** new handlers beside `ingest_receive_message_v1_envelope` in `src/lark_to_notes/live/chat_events.py`; CLI `sync-events` in `src/lark_to_notes/cli/__init__.py` (`_handle_sync_events`) | `lw-pzj.4`, `lw-pzj.5`; integration: `lw-pzj.10.6`; CLI tests extend `tests/test_cli.py` (`sync-events` cases) |
+| **2** Idempotency (`header.event_id`, surrogate hash + warning) | **TBD** SQLite DDL + insert path (`lw-pzj.2`, `lw-pzj.3`) | `lw-pzj.10.2`, `lw-pzj.10.5`, `lw-pzj.10.11` |
+| **3** Append-only history; ordered add/remove → effective set | **TBD** storage + optional materialized summary (`lw-pzj.2`, `lw-pzj.3`) | `lw-pzj.10.11`, `lw-pzj.10.2` |
+| **4** Linkage to `message_id` + `source_id`; orphan backlog until message | **TBD** orphan / attach pipeline | `lw-pzj.15`, `lw-pzj.15.1`, `lw-pzj.15.2` |
+| **5** Backfill / REST or `lark-cli`; caps + deferral; doctor capability gaps | **TBD** backfill worker (`lw-pzj.6`); caps (`lw-pzj.12`, `lw-pzj.12.1`) | `lw-pzj.10.10`, `lw-pzj.12.2`, `lw-pzj.14` |
+| **6** Distillation inputs; opt-in emoji-only tasks; `policy_version` | **TBD** `src/lark_to_notes/distill/` + rules config (`lw-pzj.8`) | `lw-pzj.10.5`, `lw-pzj.12.2`, policy gates `lw-pzj.1.2` |
+| **7** Vault `raw/` machine-owned reaction blocks per message | **TBD** `src/lark_to_notes/render/` (`lw-pzj.7`) | `lw-pzj.10.4`, `lw-pzj.13.3` |
+| **8** Reconcile vault drift from SQLite | **TBD** replay/reconcile commands (`lw-pzj.13`, `lw-pzj.13.2`, `lw-pzj.13.3`) | `lw-pzj.10.10`, `lw-pzj.13.*` |
+| **9** Permissions / scopes / preflight blockers | **TBD** scope matrix + doctor (`lw-pzj.14`, `lw-pzj.9`, `lw-pzj.14.3`) | `lw-pzj.9.1`, `lw-pzj.14.1` |
+
+**`AGENTS.md` Testing Practice** (explicit rows):
+
+| Category | Reaction-epic home | Representative pytest / harness |
+| --- | --- | --- |
+| Unit — normalization, fingerprinting, heuristics, rendering primitives | `lw-pzj.10.5`, `lw-pzj.10.11`, distill/render helpers | `tests/` nodes TBD under `lw-pzj.10.5` / `lw-pzj.10.11` |
+| Integration — `lark-cli` adapters / source normalization | `lw-pzj.10.6` | Extend `tests/test_live_chat_events.py`, fixture pipes per `lw-pzj.10.6` |
+| Replay and idempotency | `lw-pzj.10.2`, `lw-pzj.10.10`, `lw-pzj.13.1` | Ledger replay suites (TBD); existing replay patterns in `tests/test_intake.py` for chat only |
+| Golden-file — raw / vault renders | `lw-pzj.10.4`, `lw-pzj.13.3` | `tests/fixtures/` + golden paths TBD |
+| Locking / single-writer | `lw-pzj.10.8` | Runtime lock with `lark-to-notes.runtime.lock` (existing chat path); reaction render concurrency TBD |
+| Failure-path — malformed, retries, quarantine, caps | `lw-pzj.10.10`, `lw-pzj.12.1`, `lw-pzj.12.2`, `lw-pzj.12.4`, doctor `lw-pzj.9.1` | Quarantine routing TBD |
+| Redaction / sensitive-source | `lw-pzj.10.9`, normative policy `lw-pzj.1.2` | Payload redaction tests TBD |
+
+**Governance / caps / replay (cross-cutting plan paragraphs)** map to beads `lw-pzj.12` (caps, deferral, `governance_version` / `policy_version`), `lw-pzj.13`–`lw-pzj.15` (replay, reconcile, orphans), `lw-pzj.14` (permissions), `lw-pzj.11` (README / operator docs), and `lw-pzj.10.12` (CI ordering: ruff, mypy strict, pytest, e2e script).
 
 ### Dedup and Stage-Completion Contract
 
@@ -560,6 +613,7 @@ For traceability and replay, the system shall preserve at least:
 6. Generated tasks should include a stable task fingerprint and a short explanation of why the task was surfaced.
 7. Duplicate or repeated asks from the same thread or document should update existing task records rather than create new ones when the fingerprint matches strongly.
 8. Manual user updates can remain the primary way to mark tasks as completed in the early version.
+9. **Reaction-aware behavior** is governed by the **Message reaction ingestion** subsection: reactions adjust confidence or routing only through **named, versioned rules**; the default remains conservative text-first behavior unless configuration explicitly enables stronger reaction-driven promotion.
 
 ### Current Tasks Behavior
 
@@ -580,6 +634,7 @@ For traceability and replay, the system shall preserve at least:
 6. Machine-owned sections should be explicitly delimited and updated by stable IDs.
 7. User-authored narrative outside machine-owned sections must be preserved.
 8. Generated notes should add backlinks and wikilinks to related source, people, project, and area notes when confidence is sufficient.
+9. **Message raw notes** that represent IM chat messages must include a **reactions** machine-owned subsection when any reaction events exist for that `message_id`, updated idempotently from the SQLite reaction log or materialized summary (see **Message reaction ingestion**).
 
 ### Live Durable-Note Boundary (People, Projects, and Area)
 
@@ -698,6 +753,7 @@ flowchart LR
 watchlist[Watchlist]
 polling[PollingFetch]
 events[EventStream]
+reactions[ReactionEvents]
 ledger[IntakeLedger]
 rawStore[RawCapture]
 distill[Distillation]
@@ -709,6 +765,9 @@ watchlist --> polling
 watchlist --> events
 polling --> ledger
 events --> ledger
+events --> reactions
+polling --> reactions
+reactions --> rawStore
 ledger --> rawStore
 rawStore --> distill
 distill --> taskRegistry
@@ -732,6 +791,7 @@ Use a hybrid intake model:
 
 1. polling for sources where periodic fetch is acceptable or necessary
 2. event-driven intake where lower latency is useful and technically available
+3. **IM reaction events** on the event stream (`im.message.reaction.created_v1` / `deleted_v1`) plus **poll or REST backfill** of reaction lists where supported, merged into the same durable SQLite model as messages (see **Message reaction ingestion**)
 
 The design target is:
 
@@ -753,6 +813,11 @@ For document coverage, the planned `lark-cli` access paths are:
 4. `lark-cli drive file.comment.replys` to retrieve comment replies when needed
 5. message retrieval paths for DMs and groups should be confirmed and mapped into the same intake contract
 
+For **IM reaction** coverage, planned access paths include:
+
+1. **Event subscription** NDJSON for `im.message.reaction.created_v1` and `im.message.reaction.deleted_v1` (same pipe as other IM events)
+2. **List reactions** or **message get** APIs via `lark-cli` or REST for **backfill** and **reconcile** when the platform exposes them; capability gaps must surface in **doctor** and operator docs
+
 ### 3. Unified Source Model
 
 Model the following source classes:
@@ -760,6 +825,7 @@ Model the following source classes:
 1. DM
 2. group chat
 3. document source
+4. **IM reaction events** (logical stream keyed by `source_id` + `message_id` + ordered `event_id` sequence; not a separate chat thread but a child signal stream of IM)
 
 The document source class contains both:
 
@@ -836,6 +902,7 @@ Signals may include:
 10. thread context
 11. document section context
 12. prior feedback patterns
+13. **IM reaction aggregates** for the message and nearby thread window (counts, configured emoji semantics, recency, operator diversity), as defined in versioned distillation rules
 
 Processing policy:
 
@@ -1160,6 +1227,30 @@ Suggested fields:
 18. `normalized_text`
 19. `policy_version`
 
+### 3b. Message reaction events (IM)
+
+Purpose: preserve **append-only** emoji reaction history and derived **effective reaction state** for IM messages, linked to `message_id`, for distillation, raw vault projection, and replay.
+
+Suggested fields:
+
+1. `event_id` (unique; upstream `header.event_id` or documented surrogate)
+2. `source_id`
+3. `message_id`
+4. `reaction_kind` (`add` | `remove`)
+5. `emoji_type`
+6. `operator_type` (`user` | `app` or platform equivalents)
+7. `operator_open_id` / `operator_user_id` / `operator_union_id` (nullable columns or embedded in `payload_json` per privacy and field availability)
+8. `action_time`
+9. `intake_path` (`event` | `poll` | `backfill`)
+10. `payload_json` (full envelope fragment for forward compatibility)
+11. `first_seen_at`
+12. `governance_version` / `policy_version` when materialized summaries are policy-sensitive
+
+Notes:
+
+1. **Materialized summary** (optional table or columns): current reaction set per `(source_id, message_id)` updated deterministically from the append-only log, or computed on read for smaller stores—implementation chooses, but **replay determinism** is mandatory.
+2. **Task evidence** may reference reaction rows when a task is influenced by reactions; `evidence_role` should distinguish `reaction_signal` from textual evidence.
+
 ### 4. Current Item State
 
 Purpose: expose the latest active revision without mutating raw history.
@@ -1204,7 +1295,7 @@ Suggested fields:
 3. `source_item_id`
 4. `excerpt`
 5. `confidence_delta`
-6. `evidence_role`
+6. `evidence_role` (including **`reaction_signal`** when classification or promotion used reaction-derived inputs)
 
 ### 7. Note Bindings
 
