@@ -869,6 +869,7 @@ def test_sync_events_stdin_ingests_receive_v1(
     payload = json.loads(capsys.readouterr().out)
     assert payload["json_objects"] == 1
     assert payload["envelopes_ingested"] == 1
+    assert payload["reaction_rows_inserted"] == 0
     assert payload["chat_intake_drained"] == 0
     assert payload["drain_skipped"] is False
     assert "runtime" in payload
@@ -911,6 +912,7 @@ def test_sync_events_coalesce_zero_drains_ready_rows(
     payload = json.loads(capsys.readouterr().out)
     assert payload["json_objects"] == 1
     assert payload["envelopes_ingested"] == 1
+    assert payload["reaction_rows_inserted"] == 0
     assert payload["chat_intake_drained"] == 1
     assert payload["drain_skipped"] is False
     assert payload["drain_batch"] is not None

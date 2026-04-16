@@ -18,7 +18,7 @@ uv sync --dev
 uv run lark-to-notes --help
 ```
 
-Current reality, in one sentence: the offline replay -> classify -> render workflow is implemented and tested; the repo also ships an in-tree mixed poll/event chat-intake ledger, live polling via `lark-cli`, and a stdin `sync-events` path for `im.message.receive_v1` NDJSON from `lark-cli event +subscribe`, all writing into the same canonical SQLite store.
+Current reality, in one sentence: the offline replay -> classify -> render workflow is implemented and tested; the repo also ships an in-tree mixed poll/event chat-intake ledger, live polling via `lark-cli`, and a stdin `sync-events` path for `im.message.receive_v1` plus `im.message.reaction.created_v1` / `deleted_v1` NDJSON from `lark-cli event +subscribe`, writing chat rows into the ledger and reaction rows into `message_reaction_events`.
 
 ```text
 JSONL capture / fixture corpus
@@ -75,7 +75,7 @@ Important work arrives in Lark chats, docs, comments, and follow-ups, but it is 
 | LLM routing | Interface ready | Budgeting, cache, and fallback logic exist, but no provider implementation ships in-tree |
 | Mixed chat intake ledger | Implemented in-tree | Poll and `im.message.receive_v1` events converge on one canonical SQLite intake row with coalescing; pipe `lark-cli event +subscribe` NDJSON into `sync-events` |
 | Live sync/backfill | In-repo (`lark-cli`) | `sync-once`, `sync-daemon`, and `backfill` load the worker-style JSON config and run `lark_to_notes.live.chat_live.ChatLiveAdapter` into the canonical SQLite store (requires `lark-cli` and Lark auth) |
-| IM emoji reactions | Planned (beads `lw-pzj.*`) | Event types, schema, vault blocks, and distillation rules are specified in [`plan_for_lark_to_notes_workflow.md`](plan_for_lark_to_notes_workflow.md) (see **Message reaction ingestion** and the traceability matrix). `sync-events` today accepts only `im.message.receive_v1`; reaction envelopes are not ingested yet. |
+| IM emoji reactions | Partial (`lw-pzj.*`) | SQLite `message_reaction_events` + `sync-events` NDJSON ingest for reaction create/delete; vault projection, distillation rules, and quarantine parity remain in beads. |
 
 ### IM reactions — privacy, retention, and semantics (operator defaults)
 
@@ -291,14 +291,14 @@ uv run pytest
 | `sync-once` | Poll enabled live sources once | `uv run lark-to-notes sync-once --config /path/to/worker.json --db var/lark-to-notes.db --json` |
 | `sync-daemon` | Run repeated live polling cycles | `uv run lark-to-notes sync-daemon --config /path/to/worker.json --db var/lark-to-notes.db --max-cycles 2 --json` |
 | `backfill` | Re-ingest live history via `lark-cli` polling | `uv run lark-to-notes backfill --config /path/to/worker.json --db var/lark-to-notes.db --days 14 --json` |
-| `sync-events` | Ingest `im.message.receive_v1` NDJSON lines from stdin | Run `lark-cli event +subscribe …`, then pipe its stdout into `uv run lark-to-notes sync-events --db var/lark-to-notes.db --source-id dm:ou_xxx --json` |
+| `sync-events` | Ingest `im.message.receive_v1` and reaction create/delete NDJSON lines from stdin | Run `lark-cli event +subscribe …`, then pipe its stdout into `uv run lark-to-notes sync-events --db var/lark-to-notes.db --source-id dm:ou_xxx --json` (JSON includes `reaction_rows_inserted`) |
 
 Notes on the live commands:
 
 - they are part of the CLI surface today
 - `sync-once`, `sync-daemon`, `backfill`, and live `reconcile` read a JSON file with `vault_root`, `state_db`, `poll_interval_seconds`, `poll_lookback_days`, and `sources[]` (`lark_to_notes.live.worker_config`). **`--db` is the canonical SQLite store** (checkpoints, watched sources, intake ledgers, runtime runs). The `state_db` path in JSON is a **compatibility field** only; it is not merged as a second source of truth into `--db`.
 - `sync-once`, `sync-daemon`, and `backfill` run entirely in-tree via `ChatLiveAdapter` (`lark-cli` transport into the same pipeline as replay)
-- `sync-events` reads NDJSON from stdin; you normally pair it with `lark-cli event +subscribe` in a shell pipeline. By default it also **drains** ready rows from `chat_intake_ledger` into `raw_messages` under the same runtime lock as other writers: `{parent-of---db}/lark-to-notes.runtime.lock` (for example `var/lark-to-notes.runtime.lock` next to `var/lark-to-notes.db`). Pass `--no-drain` to only append ledger observations.
+- `sync-events` reads NDJSON from stdin; you normally pair it with `lark-cli event +subscribe` in a shell pipeline. Chat message lines go through `chat_intake_ledger`; reaction lines append to `message_reaction_events`. By default it also **drains** ready rows from `chat_intake_ledger` into `raw_messages` under the same runtime lock as other writers: `{parent-of---db}/lark-to-notes.runtime.lock` (for example `var/lark-to-notes.runtime.lock` next to `var/lark-to-notes.db`). Pass `--no-drain` to only append ledger observations.
 - `sync-once`, `sync-daemon`, and `backfill` require a working `lark-cli` install and credentials with access to the configured sources; `sync-events` only needs stdin (often fed by `lark-cli` in another process)
 - operator smoke / CI: `uv run python scripts/verify_live_adapter.py` exercises `doctor` plus `sync-events` with structured stderr; add `--artifacts-dir` to retain `verify_live_steps.jsonl` for dashboards or failure triage (see `tests/test_integration_logging.py`)
 
