@@ -317,6 +317,8 @@ def test_cli_workflow_json_schema_completeness(
             "fixture_corpus",
             "replay",
             "runtime",
+            "runtime_diagnostics",
+            "supervised_live",
         },
         "budget_status": {
             "db_path",

@@ -6,7 +6,7 @@ import io
 import json
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -780,7 +780,6 @@ def test_sync_once_json_runs_worker_service(
     monkeypatch.setattr(
         "lark_to_notes.cli._load_worker_service", lambda _path, _conn: (fake_config, fake_service)
     )
-    monkeypatch.setattr("lark_to_notes.cli._mirror_worker_state", lambda _conn, _config: None)
 
     exit_code = run(
         [
@@ -950,7 +949,6 @@ def test_backfill_json_runs_worker_service(
     monkeypatch.setattr(
         "lark_to_notes.cli._load_worker_service", lambda _path, _conn: (fake_config, fake_service)
     )
-    monkeypatch.setattr("lark_to_notes.cli._mirror_worker_state", lambda _conn, _config: None)
 
     exit_code = run(
         [
@@ -1011,7 +1009,6 @@ def test_sync_daemon_json_runs_multiple_cycles(
     monkeypatch.setattr(
         "lark_to_notes.cli._load_worker_service", lambda _path, _conn: (fake_config, fake_service)
     )
-    monkeypatch.setattr("lark_to_notes.cli._mirror_worker_state", lambda _conn, _config: None)
 
     exit_code = run(
         [
@@ -1152,38 +1149,32 @@ def test_reconcile_live_mode_repairs_and_verifies(
             self.enabled_sources: list[Any] = []
 
     class FakeService:
-        def __init__(self, config: FakeConfig) -> None:
+        def __init__(self, config: FakeConfig, db: Any, source_id: str) -> None:
             self.config = config
+            self._db = db
+            self._source_id = source_id
             self.poll_calls = 0
 
         def poll_once(self, *, sync_notes: bool) -> dict[str, int]:
             assert sync_notes is True
             self.poll_calls += 1
-            return {"inserted_messages": 1, "distilled_items": 1}
-
-    fake_config = FakeConfig()
-    fake_service = FakeService(fake_config)
-    monkeypatch.setattr(
-        "lark_to_notes.cli._load_worker_service", lambda _path, _conn: (fake_config, fake_service)
-    )
-
-    mirror_calls = {"count": 0}
-
-    def fake_mirror(runtime_conn: Any, _config: object) -> None:
-        mirror_calls["count"] += 1
-        if mirror_calls["count"] >= 2:
-            conn = cast(Any, runtime_conn)
-            conn.execute(
+            self._db.execute(
                 """
                 UPDATE checkpoints
                 SET last_message_id = ?, last_message_timestamp = ?
                 WHERE source_id = ?
                 """,
-                ("om_new", "2026-05-01T11:00:00Z", source.source_id),
+                ("om_new", "2026-05-01T11:00:00Z", self._source_id),
             )
-            conn.commit()
+            self._db.commit()
+            return {"inserted_messages": 1, "distilled_items": 1}
 
-    monkeypatch.setattr("lark_to_notes.cli._mirror_worker_state", fake_mirror)
+    fake_config = FakeConfig()
+    fake_service = FakeService(fake_config, conn, source.source_id)
+    monkeypatch.setattr(
+        "lark_to_notes.cli._load_worker_service", lambda _path, _conn: (fake_config, fake_service)
+    )
+
     monkeypatch.setattr(
         "lark_to_notes.cli._collect_live_source_states",
         lambda _service, _conn: {
@@ -1450,6 +1441,7 @@ def test_doctor_json_has_all_expected_keys(
         "replay",
         "runtime",
         "runtime_diagnostics",
+        "supervised_live",
     ):
         assert key in payload, f"missing key: {key!r}"
     for key in (
@@ -1488,3 +1480,4 @@ def test_doctor_human_readable_output(
     assert "status:" in out
     assert "schema_version:" in out
     assert "runtime:" in out
+    assert "supervised_live:" in out

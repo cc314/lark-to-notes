@@ -2,9 +2,12 @@
 
 The historical ``automation.lark_worker`` package loads this file with richer
 validation. For the in-repo live adapter we need a **stdlib-only** parser that
-extracts the fields required to mirror worker state into the canonical SQLite
-database and to resolve vault paths for runtime locking — without importing
-the external worker package.
+extracts ``vault_root``, ``state_db``, poll tuning, and ``sources[]`` so
+:class:`~lark_to_notes.live.chat_live.ChatLiveAdapter` can resolve runtime lock
+paths and upsert watched sources into the **canonical** ``--db`` SQLite file.
+
+The ``state_db`` path is retained for compatibility with older shared configs;
+canonical checkpoints and intake still live in the operator's ``--db``.
 """
 
 from __future__ import annotations

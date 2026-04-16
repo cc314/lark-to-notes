@@ -474,6 +474,7 @@ def _handle_replay(args: argparse.Namespace) -> int:
 def _handle_doctor(args: argparse.Namespace) -> int:
     from lark_to_notes.runtime.models import RunStatus
     from lark_to_notes.runtime.registry import health_report, list_dead_letters, list_runs
+    from lark_to_notes.runtime.supervised import supervised_live_hints
 
     corpus = load_fixture_corpus(args.fixture_corpus)
     replay_conn = connect(":memory:")
@@ -506,6 +507,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         }
         for item in list_dead_letters(runtime_conn, limit=5)
     ]
+    supervised_live = supervised_live_hints(db_path=runtime_db_path)
     payload = {
         "status": "ok" if replay_summary.total_records == corpus.record_count else "error",
         "schema_version": SCHEMA_VERSION,
@@ -530,6 +532,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "recent_failed_runs": failed_runs,
             "recent_dead_letters": dead_letters,
         },
+        "supervised_live": supervised_live,
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -555,6 +558,10 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             f"{len(failed_runs)} failed run(s), "
             f"{len(dead_letters)} recent dead letter(s), "
             f"duplicates={runtime_health.duplicate_event_count}"
+        )
+        print(
+            f"supervised_live: {supervised_live['model']} "
+            "(see `doctor --json` key supervised_live)"
         )
     return 0
 
@@ -897,7 +904,6 @@ def _handle_reconcile(args: argparse.Namespace) -> int:
         worker_config_path = str(config_path)
         mode = "live"
         live_paths = _live_runtime_payload_fields(db_path=db_path, worker_config=config)
-        _mirror_worker_state(conn, config)
         source_states = _collect_live_source_states(service, conn)
 
         def repair(_source_id: str, _stored_cursor: str | None) -> None:
@@ -914,7 +920,6 @@ def _handle_reconcile(args: argparse.Namespace) -> int:
             command="reconcile",
         )
         if repair_triggered:
-            _mirror_worker_state(conn, config)
             verification_states = _collect_live_source_states(service, conn)
             verification_report = reconcile_cursors(conn, verification_states)
         else:
@@ -1126,7 +1131,6 @@ def _handle_sync_once(args: argparse.Namespace) -> int:
         with RuntimeLock(_runtime_lock_path(config), owner_tag=f"sync-once:{run.run_id}"):
             service.initialize()
             result = _worker_poll_once(service, sync_notes=not args.no_sync)
-        _mirror_worker_state(runtime_conn, config)
         completed = (
             finish_run(
                 runtime_conn,
@@ -1209,7 +1213,6 @@ def _handle_sync_daemon(args: argparse.Namespace) -> int:
                 with RuntimeLock(_runtime_lock_path(config), owner_tag=f"sync-daemon:{run.run_id}"):
                     service.initialize()
                     result = _worker_poll_once(service, sync_notes=not args.no_sync)
-                _mirror_worker_state(runtime_conn, config)
                 finish_run(
                     runtime_conn,
                     run.run_id,
@@ -1292,7 +1295,6 @@ def _handle_backfill(args: argparse.Namespace) -> int:
                 source_ids=source_ids,
                 sync_notes=args.sync_notes,
             )
-        _mirror_worker_state(runtime_conn, config)
         completed = (
             finish_run(
                 runtime_conn,
@@ -1452,15 +1454,6 @@ def _worker_backfill(
             sync_notes=sync_notes,
         ),
     )
-
-
-def _mirror_worker_state(runtime_conn: Any, worker_config: Any) -> None:
-    """Historical hook for copying worker SQLite state into the canonical DB.
-
-    The in-repo live adapter writes watched sources and checkpoints directly
-    into the canonical database, so this mirror is a no-op.
-    """
-    _ = (runtime_conn, worker_config)
 
 
 def _collect_live_source_states(service: Any, runtime_conn: Any) -> dict[str, Any]:

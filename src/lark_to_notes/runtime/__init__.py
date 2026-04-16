@@ -32,6 +32,7 @@ from lark_to_notes.runtime.registry import (
     start_run,
 )
 from lark_to_notes.runtime.retry import PermanentError, RetryPolicy
+from lark_to_notes.runtime.supervised import supervised_live_hints
 
 __all__ = [
     "BatchRunResult",
@@ -61,4 +62,5 @@ __all__ = [
     "reconcile_cursors",
     "run_background_runtime",
     "start_run",
+    "supervised_live_hints",
 ]
