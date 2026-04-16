@@ -429,6 +429,12 @@ This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) 
 ### Essential Commands
 
 ```bash
+# Health and reconciliation
+br doctor
+br doctor --repair
+br sync --status      # Check whether DB and JSONL diverged
+br sync --import-only # Import newer JSONL into DB safely
+
 # View ready issues (open, unblocked, not deferred)
 br ready              # or: bd ready
 
@@ -445,16 +451,20 @@ br close <id1> <id2>  # Close multiple issues at once
 
 # Sync with git
 br sync --flush-only  # Export DB to JSONL
-br sync --status      # Check sync status
+
+# Graph validation
+br dep cycles
 ```
 
 ### Workflow Pattern
 
-1. **Start**: Run `br ready` to find actionable work
-2. **Claim**: Use `br update <id> --status=in_progress`
-3. **Work**: Implement the task
-4. **Complete**: Use `br close <id>`
-5. **Sync**: Always run `br sync --flush-only` at session end
+1. **Health check**: Run `br doctor` and `br sync --status`.
+2. **Reconcile first**: If `br doctor` reports stale blocked cache or recoverable anomalies, run `br doctor --repair` before more writes. If JSONL is newer, run `br sync --import-only`.
+3. **Start**: Run `br ready` to find actionable work.
+4. **Claim**: Use `br update <id> --status=in_progress`.
+5. **Work**: Implement the task.
+6. **Complete**: Use `br close <id>`.
+7. **Sync**: Always run `br sync --flush-only` at session end once health and sync state are clean.
 
 ### Key Concepts
 
@@ -481,7 +491,89 @@ git push                # Push to remote
 - Update status as you work (in_progress → closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
+- Prefer normal DB-backed `br` usage for day-to-day work; use `--no-db` only for deliberate JSONL-only edits or recovery investigation
+- After any `--no-db` mutation, reconcile back into the DB with `br sync --import-only` before returning to ordinary DB-backed work
+- Treat `blocked_issues_cache is marked stale and needs rebuild` as a real stop-and-repair warning, not background noise
+- After `br` upgrades, repair attempts, or DB rebuilds, validate behavior in a disposable `/tmp` workspace before trusting changed assumptions
 - Always sync before ending session
+
+### Malformed SQLite DB (`database disk image is malformed`, bad indexes)
+
+This workspace has seen **SQLite page/index corruption** in `.beads/beads.db` (for example `idx_issues_list_active_order` out of order or “row N missing from index”) while **`issues.jsonl` stayed valid**. JSONL remains the **recovery source of truth**; the DB is rebuildable from it.
+
+**Prevention (reduces risk; not a guarantee):**
+
+- Obey **`br` Operational Guardrails** below—especially **no parallel `br` writes**, no huge chained mutating batches, and do not poke `beads.db` with ad-hoc `sqlite3` while `br` (or another agent) is using the same workspace.
+- After **`br doctor --repair`**, **`br sync --import-only`**, or a **`br` upgrade**, run **`br doctor`** before doing more writes.
+- Treat **`WARN db.sidecars`** (WAL/SHM files next to `beads.db`) as a signal to **avoid concurrent DB users** and to **re-check** `br doctor` if anything still looks off.
+
+**When you see it (typical `br doctor` lines):**
+
+- `ERROR sqlite.integrity_check` / `ERROR sqlite3.integrity_check` mentioning **malformed** disk image or a specific **index** name.
+- `br doctor --repair` may report **“Repair complete: imported …”** but **post-repair verification still fails** on the **same index**—that means the DB was rebuilt from JSONL but an index btree is still bad.
+
+**Fix (non-destructive first; run from repo root):**
+
+1. **`br doctor`** and **`br sync --status`** — confirm JSONL parses and counts match expectations.
+2. **`br doctor --repair`** — re-import from `issues.jsonl` into the DB.
+3. If integrity errors **name an index** (often `idx_issues_list_active_order`), rebuild **only that index** from table data, then verify:
+
+   ```bash
+   sqlite3 .beads/beads.db "REINDEX idx_issues_list_active_order; PRAGMA integrity_check;"
+   ```
+
+   Use the **exact index name** from the `br doctor` / `sqlite3` error if it differs in a future `br` version.
+4. **`br doctor`** again until **`OK sqlite.integrity_check`** and **`OK sqlite3.integrity_check`**.
+
+If **`REINDEX`** fails or **`PRAGMA integrity_check`** still does not return a single `ok`, stop mutating beads, treat **`issues.jsonl`** as authoritative, and escalate to a human (any step that removes or replaces `beads.db` / WAL/SHM files is **filesystem deletion**—requires **explicit permission** under Rule Number 1).
+
+### `br` Operational Guardrails
+
+Treat `br` as a stateful local tool, not as a perfectly transactional graph API.
+
+- Do not run parallel `br` write operations.
+- Do not chain large batches of `br create`, `br update`, or `br dep add`; prefer small sequential writes.
+- Do not mix DB-backed mode and `--no-db` mode in the same editing session unless you intentionally want JSONL-only work.
+- Do not assume a failed `br` command rolled back cleanly; treat writes as partially successful until verified.
+- Do not ignore `database is busy`, stale DB or JSONL warnings, or odd nested-ID lookup failures.
+- Do not ignore `db.recoverable_anomalies: blocked_issues_cache is marked stale and needs rebuild`; repair before more mutation-heavy work.
+- Do not keep mutating after `br show` works but `br update` or `br close` says the same issue is missing; assume DB inconsistency and investigate.
+- Do not treat a closed upstream GitHub issue as proof the whole failure family is solved; verify locally in `/tmp` before changing workflow assumptions.
+- Do not force `br sync --flush-only` if it warns that export would lose issues; inspect and reconcile first.
+- Do not put shell-sensitive backticks or complex interpolation directly into `br create` or `br update` arguments; use careful quoting.
+- Do not trust long dependency-edit chains blindly; verify the touched issues after each small batch.
+- Re-run `br dep cycles` frequently while reshaping the graph.
+- If DB-backed output disagrees with `--no-db`, treat `issues.jsonl` as the recovery truth and stop further writes until you reconcile.
+
+### Safer `br` Write Pattern
+
+1. Run `br doctor`.
+2. Run `br sync --status`.
+3. If `br doctor` reports stale blocked cache or other recoverable anomalies, run `br doctor --repair` before making more edits.
+4. If JSONL is newer, run `br sync --import-only` before making more edits.
+5. Create parent issues first, then child issues, then dependency edges.
+6. Make small sequential writes and verify after each batch with `br show`, `br dep list`, or `br list --json`.
+7. Run `br dep cycles` before and after dependency-heavy edits.
+8. If anything feels inconsistent, stop and verify with `br show <id>`, `br show <id> --no-db`, and, when needed, `sqlite3 .beads/beads.db "PRAGMA integrity_check;"`. If the error names a bad **index**, use **Malformed SQLite DB** (`REINDEX` that index).
+9. Only run `br sync --flush-only` once the graph is stable and sync state is healthy.
+
+### `br` Recovery And Upgrade Discipline
+
+When `br` starts behaving strangely, prefer a short explicit recovery loop over more experimentation:
+
+1. Stop further writes.
+2. Run `br doctor` and `br sync --status`.
+3. If you see stale blocked cache or recoverable anomalies, run `br doctor --repair`.
+4. If JSONL is newer, run `br sync --import-only`.
+5. If **`br doctor` still reports SQLite integrity / malformed index errors** after repair, follow **Malformed SQLite DB** above (`REINDEX` the named index, then re-run `br doctor`).
+6. If DB-backed commands still disagree with `--no-db`, treat the DB as suspect and keep JSONL as the recovery source of truth.
+7. After a repair or `br` upgrade, validate the claimed fix in `/tmp` before trusting the live repo workspace.
+
+Minimal `/tmp` smoke tests worth re-running after upgrades:
+
+- dotted-ID `show` and `update`
+- one `--no-db` mutation followed by `br sync --import-only`
+- `br doctor` after ordinary writes to see whether blocked-cache warnings still appear
 
 <!-- end-br-agent-instructions -->
 
