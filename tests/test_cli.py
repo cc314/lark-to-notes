@@ -800,6 +800,9 @@ def test_sync_once_json_runs_worker_service(
     assert payload["distilled_items"] == 1
     assert payload["sync_notes"] is True
     assert payload["runtime"]["run_count_total"] == 1
+    assert payload["canonical_db_path"] == str((tmp_path / "state.db").resolve())
+    assert payload["runtime_lock_path"] == str((tmp_path / "var" / "lark-to-notes.runtime.lock").resolve())
+    assert payload["config_state_db"] == str((tmp_path / "worker.db").resolve())
 
 
 def test_sync_once_in_repo_adapter_without_external_worker(

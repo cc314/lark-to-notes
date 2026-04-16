@@ -247,7 +247,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=None,
-        help="Optional lark_worker JSON config for live source reconciliation",
+        help=(
+            "Optional worker-style live JSON (same file as sync-once) "
+            "for lark-cli-backed reconcile"
+        ),
     )
     reconcile_parser.add_argument(
         "--json",
@@ -291,7 +294,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=_default_worker_config_path(),
-        help="Path to the live lark_worker JSON config",
+        help="Path to worker-style live JSON (vault_root, sources, poll settings)",
     )
     sync_once_parser.add_argument("--db", type=Path, default=_default_db_path())
     sync_once_parser.add_argument(
@@ -310,7 +313,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=_default_worker_config_path(),
-        help="Path to the live lark_worker JSON config",
+        help="Path to worker-style live JSON (vault_root, sources, poll settings)",
     )
     sync_daemon_parser.add_argument("--db", type=Path, default=_default_db_path())
     sync_daemon_parser.add_argument(
@@ -345,7 +348,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=_default_worker_config_path(),
-        help="Path to the live lark_worker JSON config",
+        help="Path to worker-style live JSON (vault_root, sources, poll settings)",
     )
     backfill_parser.add_argument("--db", type=Path, default=_default_db_path())
     backfill_parser.add_argument(
@@ -878,6 +881,7 @@ def _handle_reconcile(args: argparse.Namespace) -> int:
     verification_report = None
     repair_triggered = False
     worker_config_path: str | None = None
+    live_paths: dict[str, str] = {}
     live_result = None
     if config_path is not None:
         try:
@@ -892,6 +896,7 @@ def _handle_reconcile(args: argparse.Namespace) -> int:
             )
         worker_config_path = str(config_path)
         mode = "live"
+        live_paths = _live_runtime_payload_fields(db_path=db_path, worker_config=config)
         _mirror_worker_state(conn, config)
         source_states = _collect_live_source_states(service, conn)
 
@@ -931,6 +936,7 @@ def _handle_reconcile(args: argparse.Namespace) -> int:
         "repair_sync_triggered": repair_triggered,
         "gap_details": list(verification_report.gap_details),
         "initial_gap_details": list(live_result.report.gap_details),
+        **live_paths,
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1145,11 +1151,11 @@ def _handle_sync_once(args: argparse.Namespace) -> int:
         "db_path": str(db_path),
         "config_path": str(config_path),
         "runtime_run_id": completed.run_id,
-        "worker_state_db": str(config.state_db),
         "inserted_messages": result.get("inserted_messages", 0),
         "distilled_items": result.get("distilled_items", 0),
         "sync_notes": not args.no_sync,
         "runtime": asdict(health_report(runtime_conn)),
+        **_live_runtime_payload_fields(db_path=db_path, worker_config=config),
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1234,13 +1240,13 @@ def _handle_sync_daemon(args: argparse.Namespace) -> int:
     payload = {
         "db_path": str(db_path),
         "config_path": str(config_path),
-        "worker_state_db": str(config.state_db),
         "cycle_count": cycle_count,
         "idle_cycles": idle_cycles,
         "inserted_messages": inserted_messages,
         "distilled_items": distilled_items,
         "run_ids": run_ids,
         "runtime": asdict(health_report(runtime_conn)),
+        **_live_runtime_payload_fields(db_path=db_path, worker_config=config),
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1311,12 +1317,12 @@ def _handle_backfill(args: argparse.Namespace) -> int:
         "db_path": str(db_path),
         "config_path": str(config_path),
         "runtime_run_id": completed.run_id,
-        "worker_state_db": str(config.state_db),
         "sources_scanned": result.get("sources_scanned", 0),
         "inserted_messages": result.get("inserted_messages", 0),
         "distilled_items": result.get("distilled_items", 0),
         "sync_notes": args.sync_notes,
         "runtime": asdict(health_report(runtime_conn)),
+        **_live_runtime_payload_fields(db_path=db_path, worker_config=config),
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1469,6 +1475,18 @@ def _runtime_lock_path(worker_config: Any) -> Path:
     lock_path = cast("Path", worker_config.vault_root) / "var" / "lark-to-notes.runtime.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     return lock_path
+
+
+def _live_runtime_payload_fields(*, db_path: Path, worker_config: Any) -> dict[str, str]:
+    """Stable JSON diagnostics for supervised live commands (machine-readable output)."""
+
+    return {
+        "canonical_db_path": str(db_path.expanduser().resolve()),
+        "vault_root": str(cast("Path", worker_config.vault_root)),
+        "runtime_lock_path": str(_runtime_lock_path(worker_config)),
+        "config_state_db": str(cast("Path", worker_config.state_db)),
+        "worker_state_db": str(cast("Path", worker_config.state_db)),
+    }
 
 
 def _print_live_worker_error(
