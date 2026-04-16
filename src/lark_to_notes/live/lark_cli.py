@@ -6,9 +6,22 @@ import json
 import logging
 import shutil
 import subprocess
-from typing import Any
+import time
+from typing import TYPE_CHECKING, Any
+
+from lark_to_notes.runtime.retry import RetryPolicy
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_LARK_RETRY = RetryPolicy(
+    max_attempts=4,
+    base_delay_s=1.5,
+    max_delay_s=30.0,
+    jitter_factor=0.2,
+)
 
 
 class LarkCliError(RuntimeError):
@@ -77,6 +90,82 @@ def _decode_cli_json(stdout: str, stderr: str) -> dict[str, Any]:
     raise LarkCliInvocationError(
         "lark-cli did not emit a JSON object on stdout or stderr",
     )
+
+
+def _auth_hint_in_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in (
+            "401",
+            "403",
+            "unauthorized",
+            "forbidden",
+            "permission denied",
+            "token expired",
+            "access token",
+            "invalid tenant",
+            "authentication",
+            "not logged in",
+        )
+    )
+
+
+def _is_retryable_lark_cli_exception(exc: BaseException) -> bool:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return True
+    if isinstance(exc, LarkCliInvocationError):
+        return not _auth_hint_in_text(str(exc))
+    if isinstance(exc, LarkCliApiError):
+        if _auth_hint_in_text(str(exc)):
+            return False
+        msg = str(exc).lower()
+        return any(
+            hint in msg
+            for hint in (
+                "timeout",
+                "503",
+                "502",
+                "504",
+                "429",
+                "rate limit",
+                "internal error",
+                "unavailable",
+                "try again",
+                "network",
+            )
+        )
+    return False
+
+
+def run_lark_cli_json_retryable(
+    argv: list[str],
+    *,
+    timeout: float = 180.0,
+    env: dict[str, str] | None = None,
+    policy: RetryPolicy | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> dict[str, Any]:
+    """Like :func:`run_lark_cli_json` but retries transient subprocess/API failures."""
+
+    policy = policy or _DEFAULT_LARK_RETRY
+    sleeper = sleep_fn or time.sleep
+    attempt = 0
+    while True:
+        try:
+            return run_lark_cli_json(argv, timeout=timeout, env=env)
+        except (LarkCliInvocationError, LarkCliApiError, subprocess.TimeoutExpired) as exc:
+            if not _is_retryable_lark_cli_exception(exc):
+                raise
+            if not policy.should_retry(attempt, exc):
+                raise
+            delay = policy.delay_for(attempt)
+            logger.warning(
+                "lark_cli_transient_failure_retry",
+                extra={"attempt": attempt + 1, "delay_s": delay, "error": str(exc)},
+            )
+            sleeper(delay)
+            attempt += 1
 
 
 def run_lark_cli_json(

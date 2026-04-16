@@ -19,7 +19,7 @@ from lark_to_notes.distill.models import DistillInput
 from lark_to_notes.distill.routing import classify_with_routing
 from lark_to_notes.intake.ledger import list_raw_messages_recent, observe_chat_message
 from lark_to_notes.intake.models import IntakePath, RawMessage
-from lark_to_notes.live.lark_cli import LarkCliApiError, run_lark_cli_json
+from lark_to_notes.live.lark_cli import LarkCliApiError, run_lark_cli_json_retryable
 from lark_to_notes.live.worker_config import LiveWorkerConfigSnapshot  # noqa: TC001
 from lark_to_notes.runtime.executor import drain_ready_chat_intake
 from lark_to_notes.runtime.reconcile import SourceState
@@ -248,7 +248,7 @@ def _list_argv_for_source(
 
 
 def _default_runner(argv: list[str]) -> dict[str, Any]:
-    return run_lark_cli_json(argv)
+    return run_lark_cli_json_retryable(argv)
 
 
 def _distill_recent(conn: sqlite3.Connection, *, limit: int, budget_run_id: str) -> int:

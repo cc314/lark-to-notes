@@ -28,6 +28,7 @@ from lark_to_notes.live.lark_cli import (
     LarkCliNotFoundError,
     resolve_lark_cli_binary,
     run_lark_cli_json,
+    run_lark_cli_json_retryable,
 )
 from lark_to_notes.live.worker_config import (
     LiveWorkerConfigError,
@@ -56,4 +57,5 @@ __all__ = [
     "poll_document_surfaces_to_ledger",
     "resolve_lark_cli_binary",
     "run_lark_cli_json",
+    "run_lark_cli_json_retryable",
 ]
