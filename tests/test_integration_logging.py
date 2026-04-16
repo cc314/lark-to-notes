@@ -494,3 +494,33 @@ def test_verify_live_adapter_script_emits_step_events() -> None:
     steps = {str(e.get("step", "")) for e in events}
     assert "doctor" in steps
     assert "sync_events" in steps
+
+
+def test_verify_live_adapter_writes_artifact_jsonl(tmp_path: Path) -> None:
+    """``--artifacts-dir`` mirrors stderr steps for post-run inspection."""
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "verify_live_adapter.py"
+    art_dir = tmp_path / "artifacts"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--artifacts-dir",
+            str(art_dir),
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(repo_root / "src")},
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    report = art_dir / "verify_live_steps.jsonl"
+    assert report.is_file()
+    lines = [ln for ln in report.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) >= 4
+    parsed = [json.loads(ln) for ln in lines]
+    steps_ok = {(str(e.get("step", "")), str(e.get("status", ""))) for e in parsed}
+    assert ("doctor", "ok") in steps_ok
+    assert ("sync_events", "ok") in steps_ok

@@ -281,12 +281,21 @@ Notes on the live commands:
 
 | Concern | Where it is covered |
 | --- | --- |
-| Single-writer / runtime lock (poll, drain, cross-process) | `tests/test_live_sync_controls.py`, `tests/test_runtime.py` (`TestLiveSyncOperationalControls`, `TestRuntimeLock`) |
+| Single-writer / runtime lock (poll, drain, cross-process) | `tests/test_live_sync_controls.py`, `tests/test_runtime.py` (`TestRuntimeLock`, `TestRuntimeExecutor`) |
 | Mixed poll + event intake ledger | `tests/test_intake.py`, `tests/test_live_chat_events.py`, `tests/test_live_chat_ingest.py` |
 | Live CLI wiring (`sync-once`, `sync-events`, `doctor` JSON) | `tests/test_cli.py`, `tests/test_e2e_workflow.py` |
 | Budget / heuristics routing | `tests/test_budget.py`, `tests/test_distill.py` |
-| Offline operator smoke (structured stderr steps) | `uv run python scripts/verify_live_adapter.py` (also exercised by `tests/test_integration_logging.py`) |
+| Offline operator smoke (structured stderr steps + optional NDJSON artifact) | `uv run python scripts/verify_live_adapter.py` and `… --artifacts-dir /path/to/dir` (see `tests/test_integration_logging.py`) |
 | Full pipeline demo (no Lark credentials) | `uv run python scripts/integration_run.py` |
+
+### Migration from `automation/lark_worker`
+
+The MVP worker under `automation/lark_worker/` is **not** imported by this package. Operator migration is config + CLI only:
+
+- **Same JSON shape** for live commands: `vault_root`, `state_db`, `poll_interval_seconds`, `poll_lookback_days`, and `sources[]` are read by `lark_to_notes.live.worker_config` and drive `ChatLiveAdapter` (`sync-once`, `sync-daemon`, `backfill`, live `reconcile`).
+- **Canonical state** lives in the SQLite path you pass as `--db` (checkpoints, watched sources, intake ledgers, runtime runs). The `state_db` field remains a **compatibility path** in shared configs; it is not merged as a second source of truth into `--db`.
+- **Events**: use `lark-cli event +subscribe …` piped to `sync-events` (see `contrib/sync-events-pipeline.example.sh`); that path shares the same `chat_intake_ledger` + drain semantics as polling.
+- **Smoke / CI**: `uv run python scripts/verify_live_adapter.py` exercises `doctor` + `sync-events` with structured stderr; add `--artifacts-dir` to retain `verify_live_steps.jsonl` for dashboards or failure triage.
 
 ### Background live operation (`sync-daemon`, reconcile, launchd)
 
