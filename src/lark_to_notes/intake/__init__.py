@@ -32,6 +32,13 @@ from lark_to_notes.intake.models import (
     IntakePath,
     RawMessage,
 )
+from lark_to_notes.intake.reaction_model import (
+    NormalizedReactionEvent,
+    ReactionKind,
+    parse_reaction_envelope,
+    reaction_event_id_from_envelope,
+    reaction_event_type,
+)
 
 __all__ = [
     "ChatEventAction",
@@ -41,7 +48,9 @@ __all__ = [
     "DocumentLifecycleState",
     "DocumentRecordType",
     "IntakePath",
+    "NormalizedReactionEvent",
     "RawMessage",
+    "ReactionKind",
     "chat_ingest_key",
     "chat_intake_ledger_counts",
     "count_raw_messages",
@@ -59,5 +68,8 @@ __all__ = [
     "mark_document_intake_processed",
     "observe_chat_message",
     "observe_document_surface",
+    "parse_reaction_envelope",
+    "reaction_event_id_from_envelope",
+    "reaction_event_type",
     "start_intake_run",
 ]

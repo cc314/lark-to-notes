@@ -509,6 +509,10 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     ]
     supervised_live = supervised_live_hints(db_path=runtime_db_path)
     chat_intake = chat_intake_ledger_counts(runtime_conn)
+    rx_row = runtime_conn.execute(
+        "SELECT COUNT(*) AS c FROM message_reaction_events"
+    ).fetchone()
+    reaction_event_row_count = int(rx_row["c"] if rx_row is not None else 0)
     payload = {
         "status": "ok" if replay_summary.total_records == corpus.record_count else "error",
         "schema_version": SCHEMA_VERSION,
@@ -534,6 +538,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "recent_dead_letters": dead_letters,
         },
         "chat_intake_ledger": chat_intake,
+        "message_reaction_events": {"row_count": reaction_event_row_count},
         "supervised_live": supervised_live,
     }
     if args.json:
@@ -569,6 +574,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             f"{chat_intake['pending_coalescing']} coalescing), "
             f"{chat_intake['processed']} processed"
         )
+        print(f"reaction_events: {reaction_event_row_count} row(s)")
         print(
             f"supervised_live: {supervised_live['model']} (see `doctor --json` key supervised_live)"
         )

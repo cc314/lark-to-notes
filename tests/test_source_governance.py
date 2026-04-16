@@ -150,6 +150,7 @@ def test_init_db_creates_tables() -> None:
     assert "llm_usage_records" in tables
     assert "content_cache" in tables
     assert "document_intake_ledger" in tables
+    assert "message_reaction_events" in tables
 
 
 def test_init_db_is_idempotent() -> None:

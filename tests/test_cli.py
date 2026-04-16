@@ -1450,6 +1450,7 @@ def test_doctor_json_has_all_expected_keys(
         "runtime",
         "runtime_diagnostics",
         "chat_intake_ledger",
+        "message_reaction_events",
         "supervised_live",
     ):
         assert key in payload, f"missing key: {key!r}"
@@ -1467,6 +1468,7 @@ def test_doctor_json_has_all_expected_keys(
         assert key in payload["runtime_diagnostics"], f"missing runtime_diagnostics key: {key!r}"
     for key in ("pending_ready", "pending_coalescing", "processed"):
         assert key in payload["chat_intake_ledger"], f"missing chat_intake_ledger key: {key!r}"
+    assert payload["message_reaction_events"]["row_count"] == 0
 
 
 def test_doctor_human_readable_output(
@@ -1492,4 +1494,5 @@ def test_doctor_human_readable_output(
     assert "schema_version:" in out
     assert "runtime:" in out
     assert "chat_intake:" in out
+    assert "reaction_events:" in out
     assert "supervised_live:" in out

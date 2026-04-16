@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -332,6 +332,59 @@ CREATE INDEX IF NOT EXISTS idx_doc_intake_processing_state
     ON document_intake_ledger (processing_state, coalesce_until, first_seen_at);
 """
 
+# ---------------------------------------------------------------------------
+# Version 9 — IM message reaction events (append-only, separate from raw_messages)
+# ---------------------------------------------------------------------------
+#
+# Normative field mapping (Feishu/Lark ``im.message.reaction.*`` envelopes):
+#
+# - ``reaction_event_id``: primary idempotency key — prefer ``header.event_id``
+#   when present; otherwise ingest code must supply a documented deterministic
+#   surrogate and log that surrogacy occurred.
+# - ``source_id`` / ``message_id``: tie reactions to the same watched chat stream
+#   identifiers used by ``chat_intake_ledger`` / ``raw_messages`` (no FK here to
+#   match ``raw_messages`` looseness; orphan reactions before the parent message
+#   arrives are allowed by plan).
+# - ``reaction_kind``: ``add`` vs ``remove`` from created vs deleted events.
+# - ``emoji_type``: platform emoji key / type string.
+# - ``operator_*`` / ``operator_type``: best-effort structured identity; full
+#   envelope remains in ``payload_json`` for replay and redaction policy tests.
+# - ``intake_path``: ``event`` | ``poll`` | ``backfill`` (same semantics family
+#   as chat intake paths).
+# - ``governance_version`` / ``policy_version``: stamped when caps/rules
+#   materialize rows (may default empty until those stages exist).
+
+_V9_DDL = """
+CREATE TABLE IF NOT EXISTS message_reaction_events (
+    reaction_event_id   TEXT PRIMARY KEY,
+    source_id           TEXT NOT NULL,
+    message_id          TEXT NOT NULL,
+    reaction_kind       TEXT NOT NULL CHECK(reaction_kind IN ('add', 'remove')),
+    emoji_type          TEXT NOT NULL DEFAULT '',
+    operator_type       TEXT NOT NULL DEFAULT '',
+    operator_open_id    TEXT NOT NULL DEFAULT '',
+    operator_user_id    TEXT NOT NULL DEFAULT '',
+    operator_union_id   TEXT NOT NULL DEFAULT '',
+    action_time         TEXT NOT NULL DEFAULT '',
+    intake_path         TEXT NOT NULL DEFAULT 'event'
+                            CHECK(intake_path IN ('event', 'poll', 'backfill')),
+    payload_json        TEXT NOT NULL DEFAULT '{}',
+    first_seen_at       TEXT NOT NULL
+                            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    governance_version  TEXT NOT NULL DEFAULT '',
+    policy_version      TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_reaction_source_message
+    ON message_reaction_events (source_id, message_id);
+
+CREATE INDEX IF NOT EXISTS idx_message_reaction_message_id
+    ON message_reaction_events (message_id);
+
+CREATE INDEX IF NOT EXISTS idx_message_reaction_action_time
+    ON message_reaction_events (source_id, action_time);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
@@ -341,6 +394,7 @@ _MIGRATIONS: dict[int, str] = {
     6: _V6_DDL,
     7: _V7_DDL,
     8: _V8_DDL,
+    9: _V9_DDL,
 }
 
 

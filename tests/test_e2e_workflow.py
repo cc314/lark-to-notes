@@ -319,6 +319,7 @@ def test_cli_workflow_json_schema_completeness(
             "runtime",
             "runtime_diagnostics",
             "chat_intake_ledger",
+            "message_reaction_events",
             "supervised_live",
         },
         "budget_status": {
