@@ -17,19 +17,26 @@ from lark_to_notes.intake.reaction_store import (
 from lark_to_notes.storage.db import connect, init_db
 
 
-def _event(*, eid: str = "", emoji: str = "OK") -> NormalizedReactionEvent:
+def _event(
+    *,
+    eid: str = "",
+    emoji: str = "OK",
+    message_id: str = "om_1",
+    action_time: str = "1",
+    operator_open_id: str = "ou_a",
+) -> NormalizedReactionEvent:
     return NormalizedReactionEvent(
         reaction_event_id=eid,
         source_id="dm:test",
-        message_id="om_1",
+        message_id=message_id,
         reaction_kind=ReactionKind.ADD,
         emoji_type=emoji,
         operator_type="user",
-        operator_open_id="ou_a",
+        operator_open_id=operator_open_id,
         operator_user_id="",
         operator_union_id="",
-        action_time="1",
-        payload={"header": {}, "event": {"message_id": "om_1"}},
+        action_time=action_time,
+        payload={"header": {}, "event": {"message_id": message_id}},
     )
 
 
@@ -101,6 +108,75 @@ def test_raw_message_present_when_raw_exists(mem: sqlite3.Connection) -> None:
     ).fetchone()
     assert int(row[0]) == 1
     assert row[1] == chat_ingest_key("dm:test", "om_1")
+
+
+def test_message_reaction_events_table_has_expected_columns(mem: sqlite3.Connection) -> None:
+    """Migrations must materialize the reaction ledger with v10 correlation columns."""
+
+    rows = mem.execute("PRAGMA table_info(message_reaction_events)").fetchall()
+    names = {str(r["name"]) for r in rows}
+    assert "reaction_event_id" in names
+    assert "payload_json" in names
+    assert "first_seen_at" in names
+    assert "chat_ingest_fingerprint" in names
+    assert "raw_message_present" in names
+
+
+def test_reaction_render_order_action_time_then_event_id(mem: sqlite3.Connection) -> None:
+    """Stable timeline for vault/render: tie-break on ``reaction_event_id`` when ``action_time`` ties."""
+
+    insert_message_reaction_event(mem, _event(eid="ev_z", action_time="9"))
+    insert_message_reaction_event(mem, _event(eid="ev_a", action_time="9"))
+    insert_message_reaction_event(mem, _event(eid="ev_m", action_time="9"))
+    ordered = mem.execute(
+        """
+        SELECT reaction_event_id FROM message_reaction_events
+        WHERE source_id = ? AND message_id = ?
+        ORDER BY action_time ASC, reaction_event_id ASC
+        """,
+        ("dm:test", "om_1"),
+    ).fetchall()
+    assert [r["reaction_event_id"] for r in ordered] == ["ev_a", "ev_m", "ev_z"]
+
+
+def test_reaction_render_order_scoped_per_message(mem: sqlite3.Connection) -> None:
+    """Ordering query must not bleed reactions across ``message_id``."""
+
+    insert_message_reaction_event(mem, _event(eid="e1", message_id="om_a", action_time="1"))
+    insert_message_reaction_event(mem, _event(eid="e2", message_id="om_b", action_time="1"))
+    insert_message_reaction_event(mem, _event(eid="e3", message_id="om_a", action_time="2"))
+    ordered = mem.execute(
+        """
+        SELECT reaction_event_id FROM message_reaction_events
+        WHERE source_id = ? AND message_id = ?
+        ORDER BY action_time ASC, reaction_event_id ASC
+        """,
+        ("dm:test", "om_a"),
+    ).fetchall()
+    assert [r["reaction_event_id"] for r in ordered] == ["e1", "e3"]
+
+
+def test_upstream_idempotency_ignores_volatile_payload_header(mem: sqlite3.Connection) -> None:
+    """Same ``header.event_id`` must dedupe even when envelope copy in ``payload_json`` differs."""
+
+    base = _event(eid="feishu-stable")
+    alt = NormalizedReactionEvent(
+        reaction_event_id="feishu-stable",
+        source_id=base.source_id,
+        message_id=base.message_id,
+        reaction_kind=base.reaction_kind,
+        emoji_type=base.emoji_type,
+        operator_type=base.operator_type,
+        operator_open_id=base.operator_open_id,
+        operator_user_id=base.operator_user_id,
+        operator_union_id=base.operator_union_id,
+        action_time=base.action_time,
+        payload={"header": {"event_id": "feishu-stable", "create_time": "999"}, "event": {"message_id": "om_1"}},
+    )
+    assert insert_message_reaction_event(mem, base).inserted is True
+    assert insert_message_reaction_event(mem, alt).inserted is False
+    n = mem.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()
+    assert int(n["c"]) == 1
 
 
 def test_reaction_correlation_counts_join(mem: sqlite3.Connection) -> None:
