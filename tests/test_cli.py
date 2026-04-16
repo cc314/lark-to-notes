@@ -870,6 +870,11 @@ def test_sync_events_stdin_ingests_receive_v1(
     assert payload["json_objects"] == 1
     assert payload["envelopes_ingested"] == 1
     assert payload["reaction_rows_inserted"] == 0
+    assert payload["chat_receive_observation_exceptions"] == 0
+    assert payload["reaction_validation_rejects"] == 0
+    assert payload["reaction_insert_exceptions"] == 0
+    assert payload["reaction_parse_none_after_validate"] == 0
+    assert payload["last_reaction_quarantine_payload_hash"] is None
     assert payload["chat_intake_drained"] == 0
     assert payload["drain_skipped"] is False
     assert "runtime" in payload
@@ -913,6 +918,7 @@ def test_sync_events_coalesce_zero_drains_ready_rows(
     assert payload["json_objects"] == 1
     assert payload["envelopes_ingested"] == 1
     assert payload["reaction_rows_inserted"] == 0
+    assert payload["reaction_validation_rejects"] == 0
     assert payload["chat_intake_drained"] == 1
     assert payload["drain_skipped"] is False
     assert payload["drain_batch"] is not None

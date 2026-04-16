@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from lark_to_notes.live.reaction_envelopes import (
@@ -11,7 +13,7 @@ from lark_to_notes.live.reaction_envelopes import (
 )
 
 
-def _hdr(et: str) -> dict:
+def _hdr(et: str) -> dict[str, str]:
     return {"event_type": et, "event_id": "e1"}
 
 
@@ -60,7 +62,7 @@ def _hdr(et: str) -> dict:
     ],
 )
 def test_validate_reaction_envelope_failures(
-    env: object,
+    env: Any,
     expect: ReactionEnvelopeValidation,
 ) -> None:
     assert validate_im_message_reaction_envelope(env) == expect

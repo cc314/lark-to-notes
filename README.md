@@ -291,7 +291,7 @@ uv run pytest
 | `sync-once` | Poll enabled live sources once | `uv run lark-to-notes sync-once --config /path/to/worker.json --db var/lark-to-notes.db --json` |
 | `sync-daemon` | Run repeated live polling cycles | `uv run lark-to-notes sync-daemon --config /path/to/worker.json --db var/lark-to-notes.db --max-cycles 2 --json` |
 | `backfill` | Re-ingest live history via `lark-cli` polling | `uv run lark-to-notes backfill --config /path/to/worker.json --db var/lark-to-notes.db --days 14 --json` |
-| `sync-events` | Ingest `im.message.receive_v1` and reaction create/delete NDJSON lines from stdin | Run `lark-cli event +subscribe …`, then pipe its stdout into `uv run lark-to-notes sync-events --db var/lark-to-notes.db --source-id dm:ou_xxx --json` (JSON includes `reaction_rows_inserted`) |
+| `sync-events` | Ingest `im.message.receive_v1` and reaction create/delete NDJSON lines from stdin | Run `lark-cli event +subscribe …`, then pipe its stdout into `uv run lark-to-notes sync-events --db var/lark-to-notes.db --source-id dm:ou_xxx --json` (JSON includes `reaction_rows_inserted` plus quarantine counters and last `payload_hash` / `reason_code` fields for failed reaction or receive-v1 rows) |
 
 Notes on the live commands:
 

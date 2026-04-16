@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+import pytest
+
 from lark_to_notes.intake.ledger import chat_ingest_key, get_chat_intake_item
 from lark_to_notes.intake.models import IntakePath
 from lark_to_notes.live.chat_events import (
@@ -13,6 +15,7 @@ from lark_to_notes.live.chat_events import (
     ingest_chat_event_ndjson_lines,
     ingest_receive_message_v1_envelope,
     iter_chat_event_envelopes_from_ndjson,
+    payload_hash_for_chat_event,
 )
 from lark_to_notes.storage.db import connect, init_db
 
@@ -81,7 +84,7 @@ def test_ingest_chat_event_ndjson_lines_counts_and_skips_garbage() -> None:
         json.dumps(_receive_v1_envelope(message_id="om_a")),
         json.dumps({"header": {"event_type": "im.message.receive_v1"}, "event": {}}),
     ]
-    objs, ingested, rx = ingest_chat_event_ndjson_lines(
+    out = ingest_chat_event_ndjson_lines(
         conn,
         lines,
         source_id="dm:ou_demo",
@@ -89,9 +92,10 @@ def test_ingest_chat_event_ndjson_lines_counts_and_skips_garbage() -> None:
         chat_type="p2p",
         observed_at="2026-05-01T10:00:00Z",
     )
-    assert objs == 2
-    assert ingested == 1
-    assert rx == 0
+    assert out.json_objects == 2
+    assert out.chat_envelopes_ingested == 1
+    assert out.reaction_rows_inserted == 0
+    assert out.reaction_validation_rejects == 0
 
 
 def test_ingest_chat_event_ndjson_lines_skips_invalid_reaction_envelope() -> None:
@@ -100,16 +104,21 @@ def test_ingest_chat_event_ndjson_lines_skips_invalid_reaction_envelope() -> Non
         "header": {"event_type": "im.message.reaction.created_v1", "event_id": "rx-bad"},
         "event": {"message_id": "om_z"},
     }
-    objs, ingested, rx = ingest_chat_event_ndjson_lines(
+    out = ingest_chat_event_ndjson_lines(
         conn,
         [json.dumps(bad)],
         source_id="dm:ou_demo",
         worker_source_type="dm_user",
         chat_type="p2p",
     )
-    assert objs == 1
-    assert ingested == 0
-    assert rx == 0
+    assert out.json_objects == 1
+    assert out.chat_envelopes_ingested == 0
+    assert out.reaction_rows_inserted == 0
+    assert out.reaction_validation_rejects == 1
+    assert out.last_reaction_quarantine_event_id == "rx-bad"
+    assert out.last_reaction_quarantine_payload_hash == payload_hash_for_chat_event(bad)
+    assert out.last_reaction_quarantine_reason_code is not None
+    assert out.last_reaction_quarantine_reason_code.startswith("reaction_envelope_invalid:")
 
 
 def test_ingest_chat_event_ndjson_lines_inserts_reaction_event() -> None:
@@ -125,16 +134,17 @@ def test_ingest_chat_event_ndjson_lines_inserts_reaction_event() -> None:
         },
     }
     lines = [json.dumps(react)]
-    objs, ingested, rx = ingest_chat_event_ndjson_lines(
+    out = ingest_chat_event_ndjson_lines(
         conn,
         lines,
         source_id="dm:ou_demo",
         worker_source_type="dm_user",
         chat_type="p2p",
     )
-    assert objs == 1
-    assert ingested == 0
-    assert rx == 1
+    assert out.json_objects == 1
+    assert out.chat_envelopes_ingested == 0
+    assert out.reaction_rows_inserted == 1
+    assert out.reaction_validation_rejects == 0
     row = conn.execute(
         "SELECT message_id, reaction_kind FROM message_reaction_events WHERE reaction_event_id = ?",
         ("rx-e2e-1",),
@@ -142,6 +152,63 @@ def test_ingest_chat_event_ndjson_lines_inserts_reaction_event() -> None:
     assert row is not None
     assert row["message_id"] == "om_rx_1"
     assert row["reaction_kind"] == "add"
+
+
+def test_ingest_chat_event_ndjson_lines_reaction_insert_exception_is_quarantined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lark_to_notes.live.chat_events as chat_events_mod
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("simulated db failure")
+
+    monkeypatch.setattr(chat_events_mod, "insert_message_reaction_event", boom)
+    conn = _conn()
+    react = {
+        "header": {"event_type": "im.message.reaction.created_v1", "event_id": "rx-exc-1"},
+        "event": {
+            "message_id": "om_rx_exc",
+            "reaction_type": {"emoji_type": "THUMBSUP"},
+            "operator_type": "user",
+            "user_id": {"open_id": "ou_x"},
+            "action_time": "1",
+        },
+    }
+    out = ingest_chat_event_ndjson_lines(
+        conn,
+        [json.dumps(react)],
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+    )
+    assert out.reaction_rows_inserted == 0
+    assert out.reaction_insert_exceptions == 1
+    assert out.last_reaction_quarantine_event_id == "rx-exc-1"
+    assert out.last_reaction_quarantine_reason_code == "reaction_insert_exception:RuntimeError"
+
+
+def test_ingest_chat_event_ndjson_lines_receive_v1_exception_is_quarantined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lark_to_notes.live.chat_events as chat_events_mod
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise ValueError("simulated ledger failure")
+
+    monkeypatch.setattr(chat_events_mod, "observe_chat_message", boom)
+    conn = _conn()
+    env = _receive_v1_envelope(message_id="om_exc_1")
+    out = ingest_chat_event_ndjson_lines(
+        conn,
+        [json.dumps(env)],
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+    )
+    assert out.json_objects == 1
+    assert out.chat_envelopes_ingested == 0
+    assert out.chat_receive_observation_exceptions == 1
+    assert out.last_chat_quarantine_reason_code == "chat_receive_v1_exception:ValueError"
 
 
 def test_iter_chat_event_envelopes_from_ndjson_yields_objects() -> None:

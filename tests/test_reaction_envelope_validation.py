@@ -8,7 +8,7 @@ from lark_to_notes.live.reaction_envelope_validation import (
 )
 
 
-def _header(event_type: str) -> dict:
+def _header(event_type: str) -> dict[str, str]:
     return {"event_type": event_type, "event_id": "e1"}
 
 

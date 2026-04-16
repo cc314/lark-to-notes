@@ -1380,7 +1380,7 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
     init_db(conn)
     chat_id_override: str | None = args.chat_id
     coalesce_window_seconds: int = int(args.coalesce_window_seconds)
-    json_objects, ingested, reaction_rows_inserted = ingest_chat_event_ndjson_lines(
+    outcome = ingest_chat_event_ndjson_lines(
         conn,
         sys.stdin,
         source_id=str(args.source_id),
@@ -1404,9 +1404,19 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
     payload = {
         "db_path": str(db_path),
         "source_id": str(args.source_id),
-        "json_objects": json_objects,
-        "envelopes_ingested": ingested,
-        "reaction_rows_inserted": reaction_rows_inserted,
+        "json_objects": outcome.json_objects,
+        "envelopes_ingested": outcome.chat_envelopes_ingested,
+        "reaction_rows_inserted": outcome.reaction_rows_inserted,
+        "chat_receive_observation_exceptions": outcome.chat_receive_observation_exceptions,
+        "reaction_validation_rejects": outcome.reaction_validation_rejects,
+        "reaction_insert_exceptions": outcome.reaction_insert_exceptions,
+        "reaction_parse_none_after_validate": outcome.reaction_parse_none_after_validate,
+        "last_chat_quarantine_event_id": outcome.last_chat_quarantine_event_id,
+        "last_chat_quarantine_payload_hash": outcome.last_chat_quarantine_payload_hash,
+        "last_chat_quarantine_reason_code": outcome.last_chat_quarantine_reason_code,
+        "last_reaction_quarantine_event_id": outcome.last_reaction_quarantine_event_id,
+        "last_reaction_quarantine_payload_hash": outcome.last_reaction_quarantine_payload_hash,
+        "last_reaction_quarantine_reason_code": outcome.last_reaction_quarantine_reason_code,
         "chat_intake_drained": drain_processed,
         "drain_skipped": bool(args.no_drain),
         "runtime": asdict(health_report(conn)),
@@ -1426,9 +1436,14 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
     else:
         print(f"db_path: {payload['db_path']}")
         print(f"source_id: {payload['source_id']}")
+        jo = outcome.json_objects
+        ev = outcome.chat_envelopes_ingested
+        rr = outcome.reaction_rows_inserted
+        vq = outcome.reaction_validation_rejects
+        iq = outcome.reaction_insert_exceptions
         print(
-            f"json_objects: {json_objects}  envelopes_ingested: {ingested}  "
-            f"reaction_rows_inserted: {reaction_rows_inserted}  "
+            f"json_objects: {jo}  envelopes_ingested: {ev}  reaction_rows_inserted: {rr}  "
+            f"rx_quarantine: val={vq} ins_exc={iq}  "
             f"chat_intake_drained: {drain_processed}  drain_skipped: {payload['drain_skipped']}"
         )
     return 0

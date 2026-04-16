@@ -11,7 +11,7 @@ from lark_to_notes.intake.reaction_model import (
 )
 
 
-def _header(event_type: str, event_id: str = "ev-1") -> dict:
+def _header(event_type: str, event_id: str = "ev-1") -> dict[str, str]:
     return {
         "event_id": event_id,
         "event_type": event_type,
@@ -76,7 +76,10 @@ def test_parse_deleted_flat_emoji() -> None:
 
 
 def test_parse_skips_non_reaction_and_missing_message_id() -> None:
-    assert parse_reaction_envelope({"header": _header("im.message.receive_v1")}, source_id="dm:a") is None
+    assert (
+        parse_reaction_envelope({"header": _header("im.message.receive_v1")}, source_id="dm:a")
+        is None
+    )
     assert (
         parse_reaction_envelope(
             {"header": _header("im.message.reaction.created_v1"), "event": {}},
