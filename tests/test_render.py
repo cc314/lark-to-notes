@@ -11,6 +11,8 @@ Coverage:
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pytest
@@ -723,6 +725,57 @@ class TestNoteWriterMergeRawMachineBlock:
         )
         assert r.outcome == RenderOutcome.FAILED
         assert "invalid vault path" in (r.error or "")
+
+    def test_concurrent_merge_raw_machine_block_single_writer_is_atomic(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Many threads sharing one :class:`NoteWriter` must not tear markers (lw-pzj.10.8)."""
+
+        raw = tmp_path / "raw"
+        raw.mkdir(parents=True)
+        note = raw / "rx-concurrent.md"
+        note.write_text(
+            "HUMAN_HEAD\n\nHUMAN_TAIL\n",
+            encoding="utf-8",
+        )
+        bid = "ltn-rx-concstress01"
+        writer = NoteWriter(vault_root=tmp_path)
+        seq_lock = threading.Lock()
+        seq = 0
+
+        def next_seq() -> int:
+            nonlocal seq
+            with seq_lock:
+                seq += 1
+                return seq
+
+        def run_merges(_tid: int) -> None:
+            for _ in range(40):
+                inner = f"### Summary\n\n- **seq:** `{next_seq()}`\n"
+                writer.merge_raw_machine_block(
+                    relative_path="raw/rx-concurrent.md",
+                    block_id=bid,
+                    inner_markdown=inner,
+                    entity_id="stress",
+                )
+
+        n_threads = 24
+        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+            futs = [pool.submit(run_merges, t) for t in range(n_threads)]
+            for f in as_completed(futs):
+                f.result()
+
+        final = note.read_text(encoding="utf-8")
+        assert "HUMAN_HEAD" in final
+        assert "HUMAN_TAIL" in final
+        assert final.count(make_begin_marker(bid)) == 1
+        assert final.count(make_end_marker(bid)) == 1
+        assert list_block_ids(final).count(bid) == 1
+        inner = extract_block(final, bid)
+        assert inner is not None
+        round_trip = replace_block(final, bid, inner)
+        assert round_trip == final
 
 
 class TestNoteWriterRenderDaily:
