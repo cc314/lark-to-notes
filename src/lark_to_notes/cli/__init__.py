@@ -193,6 +193,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     replay_reactions_parser.set_defaults(handler=_handle_replay_reactions)
 
+    reaction_reclassify_map_parser = subparsers.add_parser(
+        "reaction-reclassify-map",
+        help="Show distill stage invalidation on policy/governance bumps (lw-pzj.13.2)",
+    )
+    reaction_reclassify_map_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+    reaction_reclassify_map_parser.set_defaults(handler=_handle_reaction_reclassify_map)
+
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Report repository and fixture-harness health",
@@ -460,6 +471,58 @@ def _build_parser() -> argparse.ArgumentParser:
     backfill_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     backfill_parser.set_defaults(handler=_handle_backfill)
 
+    reaction_backfill_parser = subparsers.add_parser(
+        "reaction-backfill",
+        help="Backfill message_reaction_events via lark-cli im reactions list over raw_messages",
+    )
+    reaction_backfill_parser.add_argument("--db", type=Path, default=_default_db_path())
+    reaction_backfill_parser.add_argument(
+        "--source-id",
+        required=True,
+        help="Watched source_id (must exist in watched_sources; e.g. dm:ou_xxx)",
+    )
+    reaction_backfill_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=25,
+        help="Max raw_messages rows to scan per outer batch (default: 25)",
+    )
+    reaction_backfill_parser.add_argument(
+        "--min-interval-ms",
+        type=int,
+        default=200,
+        help="Minimum delay between im.reactions.list calls (default: 200)",
+    )
+    reaction_backfill_parser.add_argument(
+        "--max-messages",
+        type=int,
+        default=0,
+        help="Stop after this many messages fully drained (0 = no limit)",
+    )
+    reaction_backfill_parser.add_argument(
+        "--list-page-size",
+        type=int,
+        default=50,
+        help="page_size passed to im.reactions.list (default: 50)",
+    )
+    reaction_backfill_parser.add_argument(
+        "--reaction-governance-version",
+        default="",
+        help="Override governance_version on new reaction rows (default: built-in intake version)",
+    )
+    reaction_backfill_parser.add_argument(
+        "--reaction-policy-version",
+        default="",
+        help="Stamp policy_version on new reaction rows (default empty)",
+    )
+    reaction_backfill_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+    _add_reaction_scope_preflight_flags(reaction_backfill_parser)
+    reaction_backfill_parser.set_defaults(handler=_handle_reaction_backfill)
+
     sync_events_parser = subparsers.add_parser(
         "sync-events",
         help="Read NDJSON chat event lines from stdin into the mixed chat-intake ledger",
@@ -590,6 +653,27 @@ def _handle_sources_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_reaction_reclassify_map(args: argparse.Namespace) -> int:
+    from lark_to_notes.distill.reaction_reclassify import reaction_reclassify_invalidation_report
+
+    payload = reaction_reclassify_invalidation_report()
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print("reaction-reclassify-map (lw-pzj.13.2)")
+        print(f"  policy bump stages: {', '.join(payload['policy_bump_distill_stages'])}")
+        print(
+            "  governance-only bump stages: "
+            f"{', '.join(payload['governance_only_bump_distill_stages']) or '(none)'}",
+        )
+        for row in payload["scenarios"]:
+            print(
+                f"  [{row['name']}] stages={row['stages']}",
+            )
+        print(f"  supersession: {payload['supersession_contract']}")
+    return 0
+
+
 def _handle_replay_reactions(args: argparse.Namespace) -> int:
     from lark_to_notes.intake.reaction_replay import replay_orphan_reactions
 
@@ -687,6 +771,7 @@ def _reaction_pipeline_artifact_links(
             "reaction_orphan_queue",
             "reaction_intake_deferrals",
             "reaction_reconcile_observations",
+            "reaction_backfill_checkpoints",
         ),
         "argv_templates": {
             "doctor_json": [
@@ -726,6 +811,7 @@ def _reaction_pipeline_artifact_links(
 
 def _handle_doctor(args: argparse.Namespace) -> int:
     from lark_to_notes.intake.ledger import chat_intake_ledger_counts
+    from lark_to_notes.intake.reaction_backfill import reaction_rest_backfill_doctor_block
     from lark_to_notes.intake.reaction_deferrals import (
         classify_reaction_pipeline_doctor_status,
         reaction_intake_deferral_metrics,
@@ -794,6 +880,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         fixture_corpus_root=corpus.root,
     )
     governance_ledger_sample = reaction_ledger_governance_sample_for_doctor(runtime_conn)
+    rest_backfill = reaction_rest_backfill_doctor_block(runtime_conn)
     reaction_pipeline_health = {
         "status": reaction_pipeline_status,
         "counts": {
@@ -1712,6 +1799,76 @@ def _handle_backfill(args: argparse.Namespace) -> int:
             f"distilled_items: {payload['distilled_items']}"
         )
     return 0
+
+
+def _handle_reaction_backfill(args: argparse.Namespace) -> int:
+    """Page ``im.reactions.list`` for ``raw_messages`` rows; checkpointed (lw-pzj.6.2)."""
+
+    from lark_to_notes.intake.reaction_backfill import (
+        execute_reaction_backfill,
+        make_lark_cli_reactions_list_fetcher,
+    )
+    from lark_to_notes.intake.reaction_caps import REACTION_INTAKE_GOVERNANCE_VERSION
+    from lark_to_notes.runtime.lock import RuntimeLock
+    from lark_to_notes.runtime.registry import health_report
+
+    db_path: Path = args.db
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(db_path)
+    init_db(conn)
+    gate = _reaction_preflight_exit_code(
+        command="reaction-backfill", args=args, json_output=args.json
+    )
+    if gate is not None:
+        return gate
+    lock_path = db_path.parent / "lark-to-notes.runtime.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    source_id = str(args.source_id)
+    row = conn.execute(
+        "SELECT 1 FROM watched_sources WHERE source_id = ?",
+        (source_id,),
+    ).fetchone()
+    if row is None:
+        err = {"error": "unknown_source_id", "source_id": source_id}
+        if args.json:
+            print(json.dumps(err, ensure_ascii=False, indent=2))
+        else:
+            print(f"reaction-backfill: unknown source_id {source_id!r}", file=sys.stderr)
+        return 2
+    gov = str(args.reaction_governance_version).strip() or REACTION_INTAKE_GOVERNANCE_VERSION
+    pol = str(args.reaction_policy_version).strip()
+    max_m = int(args.max_messages)
+    max_messages = None if max_m <= 0 else max_m
+    fetch = make_lark_cli_reactions_list_fetcher(
+        source_id,
+        page_size=int(args.list_page_size),
+    )
+    with RuntimeLock(lock_path, owner_tag=f"reaction-backfill:{source_id}"):
+        summary = execute_reaction_backfill(
+            conn,
+            source_id=source_id,
+            fetch_page=fetch,
+            batch_size=int(args.batch_size),
+            min_interval_s=max(0, int(args.min_interval_ms)) / 1000.0,
+            governance_version=gov,
+            policy_version=pol,
+            max_messages=max_messages,
+        )
+    payload = dict(summary)
+    payload["db_path"] = str(db_path)
+    payload["runtime"] = asdict(health_report(conn))
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"db_path: {payload['db_path']}")
+        print(
+            f"source_id: {payload['source_id']}  "
+            f"messages_processed: {payload['messages_processed']}  "
+            f"rows_inserted: {payload['rows_inserted']}  "
+            f"api_calls: {payload['api_calls']}  "
+            f"batches_completed: {payload['batches_completed']}",
+        )
+    return 1 if payload.get("last_error") else 0
 
 
 def _handle_sync_events(args: argparse.Namespace) -> int:

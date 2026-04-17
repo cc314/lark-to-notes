@@ -14,6 +14,15 @@ from lark_to_notes.distill.reaction_distill import (
     apply_reaction_distill_overlay,
     reaction_distill_overlay,
 )
+from lark_to_notes.distill.reaction_reclassify import (
+    GOVERNANCE_ONLY_BUMP_DISTILL_STAGES,
+    POLICY_BUMP_DISTILL_STAGES,
+    STAGE_REACTION_DISTILL_OVERLAY,
+    STAGE_REACTION_SIGNAL_EVIDENCE,
+    STAGE_TASK_CLASSIFICATION,
+    reaction_distill_stages_invalidated,
+    reaction_reclassify_invalidation_report,
+)
 from lark_to_notes.distill.reaction_rules import (
     DEFAULT_REACTION_RULESET_VERSION,
     ReactionRuleset,
@@ -31,6 +40,11 @@ from lark_to_notes.distill.routing import LLMProvider, classify_with_routing
 
 __all__ = [
     "DEFAULT_REACTION_RULESET_VERSION",
+    "GOVERNANCE_ONLY_BUMP_DISTILL_STAGES",
+    "POLICY_BUMP_DISTILL_STAGES",
+    "STAGE_REACTION_DISTILL_OVERLAY",
+    "STAGE_REACTION_SIGNAL_EVIDENCE",
+    "STAGE_TASK_CLASSIFICATION",
     "ClassifierResult",
     "ConfidenceBand",
     "DistillInput",
@@ -48,6 +62,8 @@ __all__ = [
     "default_reaction_ruleset",
     "get_reaction_ruleset",
     "reaction_distill_overlay",
+    "reaction_distill_stages_invalidated",
+    "reaction_reclassify_invalidation_report",
     "reaction_ruleset_versions",
     "reaction_signal_id",
 ]

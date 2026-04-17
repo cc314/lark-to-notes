@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from lark_to_notes.config.sources import Checkpoint, WatchedSource
+from lark_to_notes.config.sources import Checkpoint, ReactionBackfillCheckpoint, WatchedSource
 from lark_to_notes.storage.schema import all_versions, applied_versions_sql, migration_sql
 
 
@@ -171,6 +171,62 @@ def upsert_checkpoint(conn: sqlite3.Connection, checkpoint: Checkpoint) -> None:
             checkpoint.last_message_id,
             checkpoint.last_message_timestamp,
             checkpoint.page_token,
+            checkpoint.updated_at,
+        ),
+    )
+    conn.commit()
+
+
+def get_reaction_backfill_checkpoint(
+    conn: sqlite3.Connection, source_id: str
+) -> ReactionBackfillCheckpoint | None:
+    """Load ``reaction_backfill_checkpoints`` row for *source_id*, if any."""
+
+    row = conn.execute(
+        "SELECT * FROM reaction_backfill_checkpoints WHERE source_id = ?",
+        (source_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return ReactionBackfillCheckpoint.from_row(dict(row))
+
+
+def upsert_reaction_backfill_checkpoint(
+    conn: sqlite3.Connection, checkpoint: ReactionBackfillCheckpoint
+) -> None:
+    """Persist reaction backfill cursor state for a watched source."""
+
+    conn.execute(
+        """
+        INSERT INTO reaction_backfill_checkpoints (
+            source_id, watermark_created_at, watermark_message_id,
+            inflight_message_id, inflight_created_at, inflight_page_token,
+            batches_completed, api_calls, rows_inserted, last_error, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id) DO UPDATE SET
+            watermark_created_at = excluded.watermark_created_at,
+            watermark_message_id = excluded.watermark_message_id,
+            inflight_message_id = excluded.inflight_message_id,
+            inflight_created_at = excluded.inflight_created_at,
+            inflight_page_token = excluded.inflight_page_token,
+            batches_completed = excluded.batches_completed,
+            api_calls = excluded.api_calls,
+            rows_inserted = excluded.rows_inserted,
+            last_error = excluded.last_error,
+            updated_at = excluded.updated_at
+        """,
+        (
+            checkpoint.source_id,
+            checkpoint.watermark_created_at,
+            checkpoint.watermark_message_id,
+            checkpoint.inflight_message_id,
+            checkpoint.inflight_created_at,
+            checkpoint.inflight_page_token,
+            checkpoint.batches_completed,
+            checkpoint.api_calls,
+            checkpoint.rows_inserted,
+            checkpoint.last_error,
             checkpoint.updated_at,
         ),
     )

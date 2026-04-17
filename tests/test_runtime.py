@@ -108,8 +108,8 @@ def _chat_msg(
 
 
 class TestSchemaV5:
-    def test_schema_version_is_13(self) -> None:
-        assert SCHEMA_VERSION == 13
+    def test_schema_version_is_14(self) -> None:
+        assert SCHEMA_VERSION == 14
 
     def test_reaction_orphan_queue_table_exists(self, conn) -> None:  # type: ignore[no-untyped-def]
         row = conn.execute(

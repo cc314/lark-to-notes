@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -488,6 +488,32 @@ CREATE INDEX IF NOT EXISTS idx_reaction_reconcile_observed_at
     ON reaction_reconcile_observations (observed_at);
 """
 
+# ---------------------------------------------------------------------------
+# Version 14 — reaction REST backfill checkpoints (lw-pzj.6.2)
+# ---------------------------------------------------------------------------
+#
+# Walks ``raw_messages`` in (created_at, message_id) order while paging
+# ``im.reactions.list`` per message. ``inflight_*`` survives crash mid-page.
+
+_V14_DDL = """
+CREATE TABLE IF NOT EXISTS reaction_backfill_checkpoints (
+    source_id              TEXT PRIMARY KEY
+                               REFERENCES watched_sources(source_id)
+                               ON DELETE CASCADE,
+    watermark_created_at   TEXT,
+    watermark_message_id   TEXT,
+    inflight_message_id    TEXT,
+    inflight_created_at    TEXT,
+    inflight_page_token    TEXT,
+    batches_completed      INTEGER NOT NULL DEFAULT 0,
+    api_calls              INTEGER NOT NULL DEFAULT 0,
+    rows_inserted          INTEGER NOT NULL DEFAULT 0,
+    last_error             TEXT,
+    updated_at             TEXT NOT NULL
+                               DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
@@ -502,6 +528,7 @@ _MIGRATIONS: dict[int, str] = {
     11: _V11_DDL,
     12: _V12_DDL,
     13: _V13_DDL,
+    14: _V14_DDL,
 }
 
 

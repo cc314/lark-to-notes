@@ -120,3 +120,43 @@ class Checkpoint:
             page_token=row.get("page_token"),
             updated_at=row["updated_at"],
         )
+
+
+@dataclass(frozen=True)
+class ReactionBackfillCheckpoint:
+    """Resume cursor for :func:`lark_to_notes.intake.reaction_backfill.execute_reaction_backfill`.
+
+    ``watermark_*`` is the last ``raw_messages`` row **fully** drained through
+    ``im.reactions.list`` pagination. ``inflight_*`` captures a mid-message
+    ``page_token`` so a restarted process can continue without skipping pages.
+    """
+
+    source_id: str
+    watermark_created_at: str | None
+    watermark_message_id: str | None
+    inflight_message_id: str | None = None
+    inflight_created_at: str | None = None
+    inflight_page_token: str | None = None
+    batches_completed: int = 0
+    api_calls: int = 0
+    rows_inserted: int = 0
+    last_error: str | None = None
+    updated_at: str = field(default_factory=_utcnow_iso)
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> ReactionBackfillCheckpoint:
+        """Build from a ``reaction_backfill_checkpoints`` row."""
+
+        return cls(
+            source_id=row["source_id"],
+            watermark_created_at=row.get("watermark_created_at"),
+            watermark_message_id=row.get("watermark_message_id"),
+            inflight_message_id=row.get("inflight_message_id"),
+            inflight_created_at=row.get("inflight_created_at"),
+            inflight_page_token=row.get("inflight_page_token"),
+            batches_completed=int(row.get("batches_completed") or 0),
+            api_calls=int(row.get("api_calls") or 0),
+            rows_inserted=int(row.get("rows_inserted") or 0),
+            last_error=row.get("last_error"),
+            updated_at=row["updated_at"],
+        )
