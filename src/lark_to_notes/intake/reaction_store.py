@@ -97,6 +97,8 @@ def insert_message_reaction_event(
     event: NormalizedReactionEvent,
     *,
     intake_path: ReactionIntakePath = "event",
+    governance_version: str = "",
+    policy_version: str = "",
 ) -> ReactionInsertResult:
     """Insert one reaction row when its primary key is new.
 
@@ -104,6 +106,8 @@ def insert_message_reaction_event(
         conn: Open SQLite connection (``sqlite3.Row`` factory recommended).
         event: Parsed reaction envelope.
         intake_path: Which intake path produced the row.
+        governance_version: Governance tuple component for replay/doctor (lw-pzj.12.2).
+        policy_version: Policy tuple component for replay/doctor (lw-pzj.12.2).
 
     Returns:
         :class:`ReactionInsertResult` with the effective id and whether a new
@@ -124,7 +128,7 @@ def insert_message_reaction_event(
             action_time, intake_path, payload_json, governance_version, policy_version,
             chat_ingest_fingerprint, raw_message_present
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             rid,
@@ -139,6 +143,8 @@ def insert_message_reaction_event(
             event.action_time,
             intake_path,
             event.payload_json(),
+            governance_version,
+            policy_version,
             ingest_fp,
             raw_present,
         ),

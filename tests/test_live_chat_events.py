@@ -9,7 +9,11 @@ import pytest
 
 from lark_to_notes.intake.ledger import chat_ingest_key, get_chat_intake_item
 from lark_to_notes.intake.models import IntakePath
-from lark_to_notes.intake.reaction_caps import ReactionIntakeCaps, ReactionIntakeCapState
+from lark_to_notes.intake.reaction_caps import (
+    REACTION_INTAKE_GOVERNANCE_VERSION,
+    ReactionIntakeCaps,
+    ReactionIntakeCapState,
+)
 from lark_to_notes.intake.reaction_deferrals import count_reaction_intake_deferrals
 from lark_to_notes.live.chat_events import (
     event_type_from_envelope,
@@ -150,12 +154,14 @@ def test_ingest_chat_event_ndjson_lines_inserts_reaction_event() -> None:
     assert out.reaction_rows_inserted == 1
     assert out.reaction_validation_rejects == 0
     row = conn.execute(
-        "SELECT message_id, reaction_kind FROM message_reaction_events WHERE reaction_event_id = ?",
+        "SELECT message_id, reaction_kind, governance_version FROM message_reaction_events "
+        "WHERE reaction_event_id = ?",
         ("rx-e2e-1",),
     ).fetchone()
     assert row is not None
     assert row["message_id"] == "om_rx_1"
     assert row["reaction_kind"] == "add"
+    assert row["governance_version"] == REACTION_INTAKE_GOVERNANCE_VERSION
 
 
 def test_ingest_chat_event_ndjson_lines_reaction_insert_exception_is_quarantined(

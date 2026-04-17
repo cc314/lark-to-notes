@@ -354,7 +354,12 @@ def ingest_chat_event_ndjson_lines(
                     },
                 )
                 continue
-            res = insert_message_reaction_event(conn, rev)
+            res = insert_message_reaction_event(
+                conn,
+                rev,
+                governance_version=eff_caps.governance_version,
+                policy_version=eff_caps.policy_version,
+            )
         except Exception as exc:
             reaction_cap_release_slot(eff_state, source_id=source_id)
             rx_ins_exc += 1

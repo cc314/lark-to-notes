@@ -426,6 +426,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Defer validated reaction envelopes for --source-id after N per batch (0=unlimited)",
     )
+    sync_events_parser.add_argument(
+        "--reaction-governance-version",
+        default="",
+        help="Override governance_version on new reaction rows (default: built-in intake version)",
+    )
+    sync_events_parser.add_argument(
+        "--reaction-policy-version",
+        default="",
+        help="Stamp policy_version on new reaction rows (default empty)",
+    )
     sync_events_parser.set_defaults(handler=_handle_sync_events)
 
     return parser
@@ -1384,7 +1394,11 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
 
     import sys
 
-    from lark_to_notes.intake.reaction_caps import ReactionIntakeCaps, ReactionIntakeCapState
+    from lark_to_notes.intake.reaction_caps import (
+        REACTION_INTAKE_GOVERNANCE_VERSION,
+        ReactionIntakeCaps,
+        ReactionIntakeCapState,
+    )
     from lark_to_notes.live.chat_events import ingest_chat_event_ndjson_lines
     from lark_to_notes.runtime.executor import drain_ready_chat_intake
     from lark_to_notes.runtime.registry import finish_run, health_report, start_run
@@ -1396,9 +1410,13 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
     init_db(conn)
     chat_id_override: str | None = args.chat_id
     coalesce_window_seconds: int = int(args.coalesce_window_seconds)
+    gov = str(args.reaction_governance_version).strip() or REACTION_INTAKE_GOVERNANCE_VERSION
+    pol = str(args.reaction_policy_version).strip()
     caps = ReactionIntakeCaps(
         max_reaction_envelopes_per_run=int(args.max_reactions_per_run),
         max_reaction_envelopes_per_source_per_run=int(args.max_reactions_per_source),
+        governance_version=gov,
+        policy_version=pol,
     )
     cap_state = ReactionIntakeCapState()
     reaction_intake_run_id: str | None = None

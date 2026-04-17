@@ -60,6 +60,18 @@ def test_canonical_prefers_upstream_id() -> None:
     assert canonical_reaction_event_id(ev) == "feishu-id"
 
 
+def test_insert_stamps_governance_and_policy_versions(mem: sqlite3.Connection) -> None:
+    ev = _event(eid="ev-gov")
+    insert_message_reaction_event(mem, ev, governance_version="gov_x", policy_version="pol_y")
+    row = mem.execute(
+        "SELECT governance_version, policy_version FROM message_reaction_events WHERE reaction_event_id = ?",
+        ("ev-gov",),
+    ).fetchone()
+    assert row is not None
+    assert row["governance_version"] == "gov_x"
+    assert row["policy_version"] == "pol_y"
+
+
 def test_insert_idempotent(mem: sqlite3.Connection) -> None:
     ev = _event(eid="evdup")
     r1 = insert_message_reaction_event(mem, ev)
