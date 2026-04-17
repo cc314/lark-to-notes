@@ -1729,6 +1729,9 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
         "json_objects": outcome.json_objects,
         "envelopes_ingested": outcome.chat_envelopes_ingested,
         "reaction_rows_inserted": outcome.reaction_rows_inserted,
+        "reaction_rows_inserted_add": outcome.reaction_rows_inserted_add,
+        "reaction_rows_inserted_remove": outcome.reaction_rows_inserted_remove,
+        "reaction_quarantined": outcome.reaction_quarantined,
         "chat_receive_observation_exceptions": outcome.chat_receive_observation_exceptions,
         "reaction_validation_rejects": outcome.reaction_validation_rejects,
         "reaction_insert_exceptions": outcome.reaction_insert_exceptions,
@@ -1765,11 +1768,15 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
         jo = outcome.json_objects
         ev = outcome.chat_envelopes_ingested
         rr = outcome.reaction_rows_inserted
+        ra = outcome.reaction_rows_inserted_add
+        rrm = outcome.reaction_rows_inserted_remove
+        rq = outcome.reaction_quarantined
         vq = outcome.reaction_validation_rejects
         iq = outcome.reaction_insert_exceptions
         print(
             f"json_objects: {jo}  envelopes_ingested: {ev}  reaction_rows_inserted: {rr}  "
-            f"rx_quarantine: val={vq} ins_exc={iq}  "
+            f"rx_add={ra} rx_remove={rrm} rx_quarantined={rq}  "
+            f"rx_quarantine_detail: val={vq} ins_exc={iq}  "
             f"chat_intake_drained: {drain_processed}  drain_skipped: {payload['drain_skipped']}"
         )
     return 0

@@ -25,7 +25,7 @@ from lark_to_notes.intake.reaction_caps import (
     reaction_cap_release_slot,
 )
 from lark_to_notes.intake.reaction_deferrals import insert_reaction_intake_deferral
-from lark_to_notes.intake.reaction_model import parse_reaction_envelope
+from lark_to_notes.intake.reaction_model import ReactionKind, parse_reaction_envelope
 from lark_to_notes.intake.reaction_store import (
     canonical_reaction_event_id,
     insert_message_reaction_event,
@@ -62,11 +62,18 @@ class ChatEventNdjsonIngestOutcome:
 
     ``reaction_benign_duplicate_replays`` counts parsed reactions whose canonical
     ``reaction_event_id`` was already stored (retry storm; no cap slot, no insert).
+
+    ``reaction_rows_inserted_add`` / ``reaction_rows_inserted_remove`` split successful
+    inserts by ``reaction_kind``. ``reaction_quarantined`` is the sum of validation
+    rejects, parse-none-after-validate, and insert exceptions (stable ``sync-events --json`` / CI).
     """
 
     json_objects: int
     chat_envelopes_ingested: int
     reaction_rows_inserted: int
+    reaction_rows_inserted_add: int
+    reaction_rows_inserted_remove: int
+    reaction_quarantined: int
     chat_receive_observation_exceptions: int
     reaction_validation_rejects: int
     reaction_insert_exceptions: int
@@ -224,8 +231,10 @@ def ingest_chat_event_ndjson_lines(
     Returns :class:`ChatEventNdjsonIngestOutcome` with *json_objects* (decoded
     dict lines), *chat_envelopes_ingested* (``im.message.receive_v1`` ledger
     observations), *reaction_rows_inserted* (new ``message_reaction_events``
-    rows), *reaction_benign_duplicate_replays* (canonical id already present),
-    plus quarantine counters and last-seen fingerprints (bounded memory).
+    rows), *reaction_rows_inserted_add* / *reaction_rows_inserted_remove* (split
+    by ``reaction_kind``), *reaction_quarantined* (validation + parse-none +
+    insert-exception totals), *reaction_benign_duplicate_replays* (canonical id
+    already present), plus quarantine counters and last-seen fingerprints (bounded memory).
     """
     eff_caps = caps or ReactionIntakeCaps()
     eff_state = cap_state or ReactionIntakeCapState()
@@ -236,6 +245,8 @@ def ingest_chat_event_ndjson_lines(
     objects = 0
     ingested = 0
     reactions_inserted = 0
+    reactions_inserted_add = 0
+    reactions_inserted_remove = 0
     chat_exc = 0
     rx_val_reject = 0
     rx_ins_exc = 0
@@ -391,12 +402,20 @@ def ingest_chat_event_ndjson_lines(
             continue
         if res.inserted:
             reactions_inserted += 1
+            if rev.reaction_kind is ReactionKind.ADD:
+                reactions_inserted_add += 1
+            else:
+                reactions_inserted_remove += 1
         else:
             reaction_cap_release_slot(eff_state, source_id=source_id)
+    rx_quarantined = rx_val_reject + rx_parse_none + rx_ins_exc
     return ChatEventNdjsonIngestOutcome(
         json_objects=objects,
         chat_envelopes_ingested=ingested,
         reaction_rows_inserted=reactions_inserted,
+        reaction_rows_inserted_add=reactions_inserted_add,
+        reaction_rows_inserted_remove=reactions_inserted_remove,
+        reaction_quarantined=rx_quarantined,
         chat_receive_observation_exceptions=chat_exc,
         reaction_validation_rejects=rx_val_reject,
         reaction_insert_exceptions=rx_ins_exc,

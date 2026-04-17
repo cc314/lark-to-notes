@@ -101,6 +101,9 @@ def test_ingest_chat_event_ndjson_lines_counts_and_skips_garbage() -> None:
     assert out.json_objects == 2
     assert out.chat_envelopes_ingested == 1
     assert out.reaction_rows_inserted == 0
+    assert out.reaction_rows_inserted_add == 0
+    assert out.reaction_rows_inserted_remove == 0
+    assert out.reaction_quarantined == 0
     assert out.reaction_validation_rejects == 0
     assert out.reaction_cap_deferred == 0
     assert out.last_reaction_cap_reason_code is None
@@ -123,6 +126,9 @@ def test_ingest_chat_event_ndjson_lines_skips_invalid_reaction_envelope() -> Non
     assert out.json_objects == 1
     assert out.chat_envelopes_ingested == 0
     assert out.reaction_rows_inserted == 0
+    assert out.reaction_rows_inserted_add == 0
+    assert out.reaction_rows_inserted_remove == 0
+    assert out.reaction_quarantined == 1
     assert out.reaction_validation_rejects == 1
     assert out.last_reaction_quarantine_event_id == "rx-bad"
     assert out.last_reaction_quarantine_payload_hash == payload_hash_for_chat_event(bad)
@@ -153,6 +159,9 @@ def test_ingest_chat_event_ndjson_lines_inserts_reaction_event() -> None:
     assert out.json_objects == 1
     assert out.chat_envelopes_ingested == 0
     assert out.reaction_rows_inserted == 1
+    assert out.reaction_rows_inserted_add == 1
+    assert out.reaction_rows_inserted_remove == 0
+    assert out.reaction_quarantined == 0
     assert out.reaction_validation_rejects == 0
     assert out.reaction_benign_duplicate_replays == 0
     row = conn.execute(
@@ -164,6 +173,37 @@ def test_ingest_chat_event_ndjson_lines_inserts_reaction_event() -> None:
     assert row["message_id"] == "om_rx_1"
     assert row["reaction_kind"] == "add"
     assert row["governance_version"] == REACTION_INTAKE_GOVERNANCE_VERSION
+
+
+def test_ingest_chat_event_ndjson_lines_inserts_reaction_deleted_v1() -> None:
+    conn = _conn()
+    react = {
+        "header": {"event_type": "im.message.reaction.deleted_v1", "event_id": "rx-del-1"},
+        "event": {
+            "message_id": "om_rx_del",
+            "reaction_type": {"emoji_type": "THUMBSUP"},
+            "operator_type": "user",
+            "user_id": {"open_id": "ou_x"},
+            "action_time": "2",
+        },
+    }
+    out = ingest_chat_event_ndjson_lines(
+        conn,
+        [json.dumps(react)],
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+    )
+    assert out.reaction_rows_inserted == 1
+    assert out.reaction_rows_inserted_add == 0
+    assert out.reaction_rows_inserted_remove == 1
+    assert out.reaction_quarantined == 0
+    row = conn.execute(
+        "SELECT reaction_kind FROM message_reaction_events WHERE reaction_event_id = ?",
+        ("rx-del-1",),
+    ).fetchone()
+    assert row is not None
+    assert row["reaction_kind"] == "remove"
 
 
 def test_ingest_chat_event_ndjson_lines_reaction_insert_exception_is_quarantined(
@@ -194,6 +234,9 @@ def test_ingest_chat_event_ndjson_lines_reaction_insert_exception_is_quarantined
         chat_type="p2p",
     )
     assert out.reaction_rows_inserted == 0
+    assert out.reaction_rows_inserted_add == 0
+    assert out.reaction_rows_inserted_remove == 0
+    assert out.reaction_quarantined == 1
     assert out.reaction_insert_exceptions == 1
     assert out.last_reaction_quarantine_event_id == "rx-exc-1"
     assert out.last_reaction_quarantine_reason_code == "reaction_insert_exception:RuntimeError"
@@ -278,6 +321,9 @@ def test_ingest_reaction_per_run_cap_defers_with_explicit_row() -> None:
         reaction_intake_run_id="run-cap-test",
     )
     assert out.reaction_rows_inserted == 2
+    assert out.reaction_rows_inserted_add == 2
+    assert out.reaction_rows_inserted_remove == 0
+    assert out.reaction_quarantined == 0
     assert out.reaction_cap_deferred == 1
     assert out.last_reaction_cap_reason_code == "reaction_cap_per_run_exceeded"
     assert count_reaction_intake_deferrals(conn, run_id="run-cap-test") == 1
@@ -299,6 +345,9 @@ def test_ingest_reaction_cap_replay_duplicate_does_not_consume_cap_slot() -> Non
         reaction_intake_run_id="run-dup",
     )
     assert out.reaction_rows_inserted == 1
+    assert out.reaction_rows_inserted_add == 1
+    assert out.reaction_rows_inserted_remove == 0
+    assert out.reaction_quarantined == 0
     assert out.reaction_cap_deferred == 0
     assert out.reaction_benign_duplicate_replays == 1
 
@@ -321,6 +370,9 @@ def test_ingest_reaction_cap_converges_when_limit_raised() -> None:
         reaction_intake_run_id="run-tight",
     )
     assert out_tight.reaction_rows_inserted == 2
+    assert out_tight.reaction_rows_inserted_add == 2
+    assert out_tight.reaction_rows_inserted_remove == 0
+    assert out_tight.reaction_quarantined == 0
     assert out_tight.reaction_cap_deferred == 1
     out_replay = ingest_chat_event_ndjson_lines(
         conn,
@@ -333,6 +385,9 @@ def test_ingest_reaction_cap_converges_when_limit_raised() -> None:
         reaction_intake_run_id="run-wide",
     )
     assert out_replay.reaction_rows_inserted == 1
+    assert out_replay.reaction_rows_inserted_add == 1
+    assert out_replay.reaction_rows_inserted_remove == 0
+    assert out_replay.reaction_quarantined == 0
     assert out_replay.reaction_cap_deferred == 0
     assert out_replay.reaction_benign_duplicate_replays == 2
     total = conn.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()
@@ -358,6 +413,9 @@ def test_ingest_reaction_cap_retry_storm_many_duplicates_respects_tight_cap() ->
         reaction_intake_run_id="run-storm-dup",
     )
     assert out.reaction_rows_inserted == 1
+    assert out.reaction_rows_inserted_add == 1
+    assert out.reaction_rows_inserted_remove == 0
+    assert out.reaction_quarantined == 0
     assert out.reaction_cap_deferred == 0
     assert out.reaction_benign_duplicate_replays == 49
     total = conn.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()
@@ -387,14 +445,23 @@ def test_ingest_reaction_cap_repeated_batch_no_row_growth_beyond_policy() -> Non
         )
         if i == 0:
             assert out.reaction_rows_inserted == 2
+            assert out.reaction_rows_inserted_add == 2
+            assert out.reaction_rows_inserted_remove == 0
+            assert out.reaction_quarantined == 0
             assert out.reaction_cap_deferred == 1
             assert out.reaction_benign_duplicate_replays == 0
         elif i == 1:
             assert out.reaction_rows_inserted == 1
+            assert out.reaction_rows_inserted_add == 1
+            assert out.reaction_rows_inserted_remove == 0
+            assert out.reaction_quarantined == 0
             assert out.reaction_cap_deferred == 0
             assert out.reaction_benign_duplicate_replays == 2
         else:
             assert out.reaction_rows_inserted == 0
+            assert out.reaction_rows_inserted_add == 0
+            assert out.reaction_rows_inserted_remove == 0
+            assert out.reaction_quarantined == 0
             assert out.reaction_cap_deferred == 0
             assert out.reaction_benign_duplicate_replays == 3
     total = conn.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()
@@ -419,6 +486,8 @@ def test_ingest_reaction_cap_unique_stream_each_pass_respects_per_run_cap() -> N
         reaction_intake_run_id="run-uniq-1",
     )
     assert out1.reaction_rows_inserted == cap_n
+    assert out1.reaction_rows_inserted_add == cap_n
+    assert out1.reaction_quarantined == 0
     assert out1.reaction_cap_deferred == 20 - cap_n
     assert out1.reaction_benign_duplicate_replays == 0
     out2 = ingest_chat_event_ndjson_lines(
@@ -432,6 +501,8 @@ def test_ingest_reaction_cap_unique_stream_each_pass_respects_per_run_cap() -> N
         reaction_intake_run_id="run-uniq-2",
     )
     assert out2.reaction_rows_inserted == cap_n
+    assert out2.reaction_rows_inserted_add == cap_n
+    assert out2.reaction_quarantined == 0
     assert out2.reaction_cap_deferred == 10
     assert out2.reaction_benign_duplicate_replays == cap_n
     total = conn.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()

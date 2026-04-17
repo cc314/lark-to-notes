@@ -40,6 +40,9 @@ def test_ws_like_ndjson_fixture_ingest_and_drain_writes_raw_and_reaction(tmp_pat
     assert outcome.json_objects == 2
     assert outcome.chat_envelopes_ingested == 1
     assert outcome.reaction_rows_inserted == 1
+    assert outcome.reaction_rows_inserted_add == 1
+    assert outcome.reaction_rows_inserted_remove == 0
+    assert outcome.reaction_quarantined == 0
 
     key = chat_ingest_key("dm:ou_ws", "om_ws_drain_1")
     before = get_chat_intake_item(conn, key)
