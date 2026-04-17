@@ -75,7 +75,7 @@ Important work arrives in Lark chats, docs, comments, and follow-ups, but it is 
 | LLM routing | Interface ready | Budgeting, cache, and fallback logic exist, but no provider implementation ships in-tree |
 | Mixed chat intake ledger | Implemented in-tree | Poll and `im.message.receive_v1` events converge on one canonical SQLite intake row with coalescing; pipe `lark-cli event +subscribe` NDJSON into `sync-events` |
 | Live sync/backfill | In-repo (`lark-cli`) | `sync-once`, `sync-daemon`, and `backfill` load the worker-style JSON config and run `lark_to_notes.live.chat_live.ChatLiveAdapter` into the canonical SQLite store (requires `lark-cli` and Lark auth) |
-| IM emoji reactions | Partial (`lw-pzj.*`) | SQLite `message_reaction_events` + `sync-events` NDJSON ingest for reaction create/delete; vault projection, distillation rules, and quarantine parity remain in beads. |
+| IM emoji reactions | Partial (`lw-pzj.*`) | SQLite `message_reaction_events` + `sync-events` NDJSON ingest for reaction create/delete; vault projection; distillation uses `apply_reaction_distill_overlay` (`lw-pzj.8.3`) with conservative defaults and explicit review `reason_code` prefixes (`reaction_review_*`, `reaction_signal_*`). |
 
 ### IM reactions — privacy, retention, and semantics (operator defaults)
 
@@ -85,6 +85,10 @@ These bullets summarize normative **policy** for the reaction epic; they intenti
 2. **Retention / deletes:** A platform “reaction removed” event is stored as its own **append-only** row; the ledger does not pretend earlier adds never happened. Effective “who has reacted now?” state is always **derived** from ordered add/remove history or an equivalent deterministic summary.
 3. **Emoji meaning:** Heuristics stay **conservative**; politeness or ambiguous reacts must not silently promote work. Anything that can surface a **task without supporting message text** remains **opt-in**, default off, and must record **`policy_version`** when enabled.
 4. **Explicit non-goals (near term):** No cross-tenant reaction analytics, no automatic assignment of humans from emoji alone, no mutating Lark reactions from this tool, and no emoji sentiment models unless a dedicated future issue expands scope.
+
+### Distillation — reaction overlay risk (`lw-pzj.8.3`)
+
+**Default ruleset (`ReactionRuleset` version `1`) never promotes work from emoji engagement alone:** when message text is weak, `apply_reaction_distill_overlay` keeps the lane on `needs_review` with `reaction_review_emoji_only_policy_blocked`. **High-confidence text tasks are not downgraded** except when reaction heuristics detect **multi-reactor noise** (`reaction_review_multi_reactor_noise`) or **below-floor engagement** (`reaction_review_engagement_below_min`). The explicit opt-in ruleset (`2026-04-aggressive`) can emit `reaction_signal_engagement_follow_up` for clear engagement, but still routes **borderline** shared floors to review (`reaction_review_borderline_shared_floor`). Treat every `reaction_signal_*` promotion as operator-visible risk—see bullet 3 above.
 
 ### IM reactions — Lark scopes and capability matrix (operator checklist)
 

@@ -17,8 +17,13 @@ from lark_to_notes.distill.models import (
     PromotionRec,
     TaskClass,
 )
+from lark_to_notes.distill.reaction_distill import (
+    apply_reaction_distill_overlay,
+    reaction_distill_overlay,
+)
 from lark_to_notes.distill.reaction_rules import (
     DEFAULT_REACTION_RULESET_VERSION,
+    ReactionRuleset,
     UnknownReactionRulesetError,
     default_reaction_ruleset,
     get_reaction_ruleset,
@@ -723,3 +728,125 @@ class TestReactionSignalEvidence:
             reason_codes=("reaction_signal_test",),
         )
         assert e.reason_codes == ("reaction_signal_test",)
+
+
+# ---------------------------------------------------------------------------
+# Reaction distill overlay (lw-pzj.8.3)
+# ---------------------------------------------------------------------------
+
+
+def _ctx_high() -> ClassifierResult:
+    return ClassifierResult(
+        task_class=TaskClass.CONTEXT,
+        confidence_band=ConfidenceBand.HIGH,
+        promotion_rec=PromotionRec.DAILY_ONLY,
+        reason_code="no_task_signal",
+    )
+
+
+def _high_task() -> ClassifierResult:
+    return ClassifierResult(
+        task_class=TaskClass.TASK,
+        confidence_band=ConfidenceBand.HIGH,
+        promotion_rec=PromotionRec.CURRENT_TASKS,
+        reason_code="en_action_marker",
+    )
+
+
+class TestReactionDistillOverlay:
+    def test_empty_counts_returns_none(self) -> None:
+        assert (
+            reaction_distill_overlay(
+                effective_counts={},
+                ruleset=default_reaction_ruleset(),
+                text_result=_ctx_high(),
+            )
+            is None
+        )
+
+    def test_conservative_blocks_emoji_only_weak_text(self) -> None:
+        counts = materialize_effective_counts(
+            [
+                (ReactionKind.ADD, "THUMBSUP", "ou_a"),
+                (ReactionKind.ADD, "THUMBSUP", "ou_a"),
+            ],
+        )
+        out = apply_reaction_distill_overlay(
+            _ctx_high(),
+            effective_counts=counts,
+            ruleset=default_reaction_ruleset(),
+        )
+        assert out.task_class == TaskClass.NEEDS_REVIEW
+        assert out.reason_code == "reaction_review_emoji_only_policy_blocked"
+
+    def test_aggressive_allows_engagement_follow_up(self) -> None:
+        counts = materialize_effective_counts([(ReactionKind.ADD, "THUMBSUP", "ou_a")])
+        aggressive = get_reaction_ruleset("2026-04-aggressive")
+        out = apply_reaction_distill_overlay(
+            _ctx_high(),
+            effective_counts=counts,
+            ruleset=aggressive,
+        )
+        assert out.task_class == TaskClass.FOLLOW_UP
+        assert out.reason_code == "reaction_signal_engagement_follow_up"
+
+    def test_borderline_shared_floor_stays_review_when_opt_in(self) -> None:
+        counts = {("THUMBSUP", "ou_a"): 1, ("OK", "ou_b"): 1}
+        ruleset = ReactionRuleset(
+            version="test-borderline",
+            migration_note="unit",
+            allow_emoji_only_promotion=True,
+            min_effective_total_count_for_task_signal=2,
+        )
+        out = apply_reaction_distill_overlay(
+            _ctx_high(),
+            effective_counts=counts,
+            ruleset=ruleset,
+        )
+        assert out.reason_code == "reaction_review_borderline_shared_floor"
+
+    def test_multi_reactor_noise_overrides_high_task(self) -> None:
+        steps = [(ReactionKind.ADD, "T", f"ou_{i}") for i in range(7)]
+        counts = materialize_effective_counts(steps)
+        out = apply_reaction_distill_overlay(
+            _high_task(),
+            effective_counts=counts,
+            ruleset=default_reaction_ruleset(),
+        )
+        assert out.reason_code == "reaction_review_multi_reactor_noise"
+
+    def test_high_task_unchanged_when_reactions_quiet(self) -> None:
+        counts = materialize_effective_counts(
+            [(ReactionKind.ADD, "THUMBSUP", "ou_one"), (ReactionKind.ADD, "OK", "ou_one")],
+        )
+        text = _high_task()
+        out = apply_reaction_distill_overlay(
+            text,
+            effective_counts=counts,
+            ruleset=default_reaction_ruleset(),
+        )
+        assert out is text
+        assert out.reason_code == "en_action_marker"
+
+    def test_engagement_below_min(self) -> None:
+        counts = materialize_effective_counts([(ReactionKind.ADD, "THUMBSUP", "ou_a")])
+        out = apply_reaction_distill_overlay(
+            _ctx_high(),
+            effective_counts=counts,
+            ruleset=default_reaction_ruleset(),
+        )
+        assert out.reason_code == "reaction_review_engagement_below_min"
+
+    def test_engagement_below_min_even_when_opt_in(self) -> None:
+        """Aggressive ruleset lowers floor to 1; zero total still short-circuits earlier."""
+
+        counts: dict[tuple[str, str], int] = {}
+        aggressive = get_reaction_ruleset("2026-04-aggressive")
+        assert (
+            reaction_distill_overlay(
+                effective_counts=counts,
+                ruleset=aggressive,
+                text_result=_ctx_high(),
+            )
+            is None
+        )

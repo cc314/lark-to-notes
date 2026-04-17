@@ -10,6 +10,10 @@ from lark_to_notes.distill.models import (
     PromotionRec,
     TaskClass,
 )
+from lark_to_notes.distill.reaction_distill import (
+    apply_reaction_distill_overlay,
+    reaction_distill_overlay,
+)
 from lark_to_notes.distill.reaction_rules import (
     DEFAULT_REACTION_RULESET_VERSION,
     ReactionRuleset,
@@ -37,11 +41,13 @@ __all__ = [
     "ReactionSignalEvidence",
     "TaskClass",
     "UnknownReactionRulesetError",
+    "apply_reaction_distill_overlay",
     "build_reaction_signal_evidence",
     "classify_with_routing",
     "default_classifier",
     "default_reaction_ruleset",
     "get_reaction_ruleset",
+    "reaction_distill_overlay",
     "reaction_ruleset_versions",
     "reaction_signal_id",
 ]
