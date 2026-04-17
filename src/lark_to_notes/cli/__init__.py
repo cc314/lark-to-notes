@@ -168,6 +168,31 @@ def _build_parser() -> argparse.ArgumentParser:
     replay_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     replay_parser.set_defaults(handler=_handle_replay)
 
+    replay_reactions_parser = subparsers.add_parser(
+        "replay-reactions",
+        help="Rebuild reaction↔raw linkage for queued orphans (lw-pzj.13.1)",
+    )
+    replay_reactions_parser.add_argument("--db", type=Path, default=_default_db_path())
+    replay_reactions_parser.add_argument(
+        "--source-id",
+        action="append",
+        default=[],
+        dest="source_ids",
+        metavar="SOURCE_ID",
+        help="Restrict to one or more source_id values (repeatable)",
+    )
+    replay_reactions_parser.add_argument(
+        "--progress-ndjson",
+        action="store_true",
+        help="Emit one JSON progress object per processed pair to stderr",
+    )
+    replay_reactions_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable summary JSON on stdout",
+    )
+    replay_reactions_parser.set_defaults(handler=_handle_replay_reactions)
+
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Report repository and fixture-harness health",
@@ -562,6 +587,42 @@ def _handle_sources_list(args: argparse.Namespace) -> int:
         for source in sources:
             status = "enabled" if source.enabled else "disabled"
             print(f"- {source.source_id} [{status}] {source.name}")
+    return 0
+
+
+def _handle_replay_reactions(args: argparse.Namespace) -> int:
+    from lark_to_notes.intake.reaction_replay import replay_orphan_reactions
+
+    db_path: Path = args.db
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(db_path)
+    init_db(conn)
+    srcs = frozenset(str(s) for s in args.source_ids) if args.source_ids else None
+
+    def _progress(obj: dict[str, object]) -> None:
+        print(json.dumps(obj, ensure_ascii=False), file=sys.stderr)
+
+    summary = replay_orphan_reactions(
+        conn,
+        source_ids=srcs,
+        progress=_progress if args.progress_ndjson else None,
+    )
+    payload = {
+        "db_path": str(db_path),
+        "pairs_processed": summary.pairs_processed,
+        "rows_attached": summary.rows_attached,
+        "pairs_idempotent_noop": summary.pairs_idempotent_noop,
+        "duration_ms": summary.duration_ms,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"replay-reactions: pairs_processed={summary.pairs_processed} "
+            f"rows_attached={summary.rows_attached} "
+            f"idempotent_noops={summary.pairs_idempotent_noop} "
+            f"duration_ms={summary.duration_ms}",
+        )
     return 0
 
 

@@ -48,7 +48,7 @@ def _link_pending_reactions_for_raw_pair(
     source_id: str,
     message_id: str,
     orphan_batch_id: str,
-) -> None:
+) -> int:
     """Flip ``raw_message_present`` and dequeue orphans for one chat pair.
 
     Reactions may be ingested before chat intake drains the parent message into
@@ -58,6 +58,10 @@ def _link_pending_reactions_for_raw_pair(
     deletes from ``reaction_orphan_queue`` — it never inserts duplicate reaction
     identities. Emits structured ``reaction_orphan_reconciled`` log (lw-pzj.15.2).
     Caller commits the transaction.
+
+    Returns:
+        Count of ``message_reaction_events`` rows updated from
+        ``raw_message_present = 0`` to ``1`` for this pair.
     """
 
     t0 = time.perf_counter()
@@ -125,6 +129,7 @@ def _link_pending_reactions_for_raw_pair(
             "elapsed_ms": round(elapsed_s * 1000.0, 3),
         },
     )
+    return attached
 
 
 def insert_raw_message(conn: sqlite3.Connection, message: RawMessage) -> bool:
@@ -173,7 +178,7 @@ def insert_raw_message(conn: sqlite3.Connection, message: RawMessage) -> bool:
         ),
     )
     inserted = cursor.rowcount > 0
-    _link_pending_reactions_for_raw_pair(
+    _ = _link_pending_reactions_for_raw_pair(
         conn,
         source_id=message.source_id,
         message_id=message.message_id,
