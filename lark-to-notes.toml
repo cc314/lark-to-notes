@@ -1,0 +1,4 @@
+# Project-local defaults (loaded when cwd is this repo; see cli._load_project_config).
+# Override any time with LARK_TO_NOTES_CONFIG=/path/to/other.toml
+
+vault_root = "~/projects/notes"

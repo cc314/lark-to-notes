@@ -353,8 +353,8 @@ Notes on the live commands:
 Project config is loaded from the first existing path in this order:
 
 1. `$LARK_TO_NOTES_CONFIG`
-2. `~/.config/lark-to-notes/config.toml`
-3. `./lark-to-notes.toml`
+2. `./lark-to-notes.toml` (project-local; overrides per-user defaults below)
+3. `~/.config/lark-to-notes/config.toml`
 
 Minimal config:
 

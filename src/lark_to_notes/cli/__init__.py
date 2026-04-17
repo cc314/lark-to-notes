@@ -2283,13 +2283,13 @@ def _load_project_config() -> dict[str, Any]:
 
     Search order:
     1. ``$LARK_TO_NOTES_CONFIG`` env var (explicit path)
-    2. ``~/.config/lark-to-notes/config.toml``
-    3. ``./lark-to-notes.toml`` (current working directory)
+    2. ``./lark-to-notes.toml`` (current working directory; project-local overrides)
+    3. ``~/.config/lark-to-notes/config.toml`` (per-user defaults)
     """
     candidates: list[Path | None] = [
         Path(os.environ["LARK_TO_NOTES_CONFIG"]) if "LARK_TO_NOTES_CONFIG" in os.environ else None,
-        Path.home() / ".config" / "lark-to-notes" / "config.toml",
         Path("lark-to-notes.toml"),
+        Path.home() / ".config" / "lark-to-notes" / "config.toml",
     ]
     for path in candidates:
         if path is not None and path.exists():
