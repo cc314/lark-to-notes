@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 import time
 import tomllib
 from dataclasses import asdict
@@ -44,6 +45,68 @@ def run(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handler = cast("Callable[[argparse.Namespace], int]", args.handler)
     return handler(args)
+
+
+def _add_reaction_scope_preflight_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--require-reaction-scopes",
+        action="store_true",
+        help=(
+            "Before work: verify im:message.reactions:read via `lark-cli auth check` "
+            "(exit 2 if missing)."
+        ),
+    )
+    parser.add_argument(
+        "--lark-profile",
+        default=None,
+        help="Optional `lark-cli --profile` value when --require-reaction-scopes is set.",
+    )
+
+
+def _reaction_preflight_exit_code(
+    *,
+    command: str,
+    args: argparse.Namespace,
+    json_output: bool,
+) -> int | None:
+    if not bool(getattr(args, "require_reaction_scopes", False)):
+        return None
+    from lark_to_notes.live.reaction_preflight import reaction_scope_preflight_check
+
+    pf = reaction_scope_preflight_check(profile=getattr(args, "lark_profile", None))
+    if pf.get("result") == "pass":
+        return None
+    if json_output:
+        print(
+            json.dumps(
+                {"error": "reaction_scope_preflight_failed", "preflight": pf},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+    else:
+        print(
+            f"{command}: reaction scope preflight failed ({pf.get('result')})",
+            file=sys.stderr,
+        )
+        print(f"remediation: {pf.get('remediation_hint', '')}", file=sys.stderr)
+    return 2
+
+
+def _handle_preflight_reactions(args: argparse.Namespace) -> int:
+    from lark_to_notes.live.reaction_preflight import reaction_scope_preflight_check
+
+    pf = reaction_scope_preflight_check(profile=getattr(args, "lark_profile", None))
+    if args.json:
+        print(json.dumps(pf, ensure_ascii=False, indent=2))
+    else:
+        print(f"preflight_reactions: result={pf.get('result')} run_id={pf.get('run_id')}")
+        print(f"check_name: {pf.get('check_name')}")
+        print(f"tenant_app_id: {pf.get('tenant_app_id')}")
+        print(f"hint: {pf.get('remediation_hint', '')}")
+    if args.strict and pf.get("result") != "pass":
+        return 2
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -302,6 +365,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip note sync after polling",
     )
     sync_once_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    _add_reaction_scope_preflight_flags(sync_once_parser)
     sync_once_parser.set_defaults(handler=_handle_sync_once)
 
     sync_daemon_parser = subparsers.add_parser(
@@ -337,6 +401,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit machine-readable JSON",
     )
+    _add_reaction_scope_preflight_flags(sync_daemon_parser)
     sync_daemon_parser.set_defaults(handler=_handle_sync_daemon)
 
     backfill_parser = subparsers.add_parser(
@@ -436,7 +501,35 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="Stamp policy_version on new reaction rows (default empty)",
     )
+    _add_reaction_scope_preflight_flags(sync_events_parser)
     sync_events_parser.set_defaults(handler=_handle_sync_events)
+
+    preflight_parser = subparsers.add_parser(
+        "preflight",
+        help="Lark capability probes before live ingest (lw-pzj.14.3)",
+    )
+    preflight_subparsers = preflight_parser.add_subparsers(dest="preflight_command", required=True)
+    preflight_reactions_parser = preflight_subparsers.add_parser(
+        "reactions",
+        help="Verify im:message.reactions:read via `lark-cli auth check`",
+    )
+    preflight_reactions_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit with code 2 when the scope check does not pass",
+    )
+    preflight_reactions_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+    preflight_reactions_parser.add_argument(
+        "--lark-profile",
+        default=None,
+        dest="lark_profile",
+        help="Forwarded to lark-cli as --profile (optional)",
+    )
+    preflight_reactions_parser.set_defaults(handler=_handle_preflight_reactions)
 
     return parser
 
@@ -741,10 +834,11 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             f"status={reaction_pipeline_status} "
             f"deferrals={defer_metrics['deferral_row_count']}"
         )
+        replay_dirs = reaction_artifact_links["replay_directories"]
         print(
             "reaction_artifact_links: "
             f"db={reaction_artifact_links['sqlite']['runtime_db_path']} "
-            f"fixture_raw={reaction_artifact_links['replay_directories']['doctor_fixture_corpus_root']} "
+            f"fixture_raw={replay_dirs['doctor_fixture_corpus_root']} "
             "(see `doctor --json` → reaction_pipeline_health.artifact_links)"
         )
         print(
@@ -1309,6 +1403,10 @@ def _handle_sync_once(args: argparse.Namespace) -> int:
             stage="load_worker_service",
         )
 
+    gate = _reaction_preflight_exit_code(command="sync-once", args=args, json_output=args.json)
+    if gate is not None:
+        return gate
+
     from lark_to_notes.runtime.lock import RuntimeLock
     from lark_to_notes.runtime.registry import finish_run, health_report, start_run
 
@@ -1378,6 +1476,10 @@ def _handle_sync_daemon(args: argparse.Namespace) -> int:
             json_output=args.json,
             stage="load_worker_service",
         )
+
+    gate = _reaction_preflight_exit_code(command="sync-daemon", args=args, json_output=args.json)
+    if gate is not None:
+        return gate
 
     from lark_to_notes.runtime.lock import RuntimeLock
     from lark_to_notes.runtime.registry import finish_run, health_report, start_run
@@ -1546,6 +1648,9 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(db_path)
     init_db(conn)
+    gate = _reaction_preflight_exit_code(command="sync-events", args=args, json_output=args.json)
+    if gate is not None:
+        return gate
     chat_id_override: str | None = args.chat_id
     coalesce_window_seconds: int = int(args.coalesce_window_seconds)
     gov = str(args.reaction_governance_version).strip() or REACTION_INTAKE_GOVERNANCE_VERSION

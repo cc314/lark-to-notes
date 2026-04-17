@@ -44,6 +44,10 @@ from lark_to_notes.live.reaction_envelopes import (
     is_im_message_reaction_event_type,
     validate_im_message_reaction_envelope,
 )
+from lark_to_notes.live.reaction_preflight import (
+    PRIMARY_REACTION_READ_SCOPE,
+    reaction_scope_preflight_check,
+)
 from lark_to_notes.live.worker_config import (
     LiveWorkerConfigError,
     LiveWorkerConfigSnapshot,
@@ -52,6 +56,7 @@ from lark_to_notes.live.worker_config import (
 )
 
 __all__ = [
+    "PRIMARY_REACTION_READ_SCOPE",
     "ChatEventNdjsonIngestOutcome",
     "DocumentAdapterBlockedError",
     "DocumentPollSummary",
@@ -78,6 +83,7 @@ __all__ = [
     "poll_document_surfaces_to_ledger",
     "reaction_envelope_is_valid",
     "reaction_envelope_validation_errors",
+    "reaction_scope_preflight_check",
     "resolve_lark_cli_binary",
     "run_lark_cli_json",
     "run_lark_cli_json_retryable",

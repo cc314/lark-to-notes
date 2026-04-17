@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -1657,6 +1658,65 @@ def test_reaction_pipeline_doctor_status_precedence() -> None:
         )
         == "degraded_partial_history"
     )
+
+
+def test_preflight_reactions_json_mocked(capsys: pytest.CaptureFixture[str]) -> None:
+    fake = {
+        "run_id": "pf_test",
+        "check_name": "lark_cli_auth_check_im_message_reactions_read",
+        "required_scopes": ["im:message.reactions:read"],
+        "result": "pass",
+        "remediation_hint": "ok",
+        "tenant_app_id": "cli_app",
+        "identity": "user",
+        "auth_check": {"ok": True, "granted": ["im:message.reactions:read"], "missing": None},
+    }
+    with patch(
+        "lark_to_notes.live.reaction_preflight.reaction_scope_preflight_check",
+        return_value=fake,
+    ):
+        exit_code = run(["preflight", "reactions", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert out["result"] == "pass"
+
+
+def test_sync_events_require_reaction_scopes_exits_before_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    pf = {
+        "run_id": "pf_x",
+        "check_name": "lark_cli_auth_check_im_message_reactions_read",
+        "required_scopes": ["im:message.reactions:read"],
+        "result": "scope_missing",
+        "remediation_hint": "grant scope",
+        "tenant_app_id": None,
+        "identity": None,
+        "auth_check": {"ok": True, "missing": ["im:message.reactions:read"]},
+    }
+    with patch(
+        "lark_to_notes.live.reaction_preflight.reaction_scope_preflight_check",
+        return_value=pf,
+    ):
+        exit_code = run(
+            [
+                "sync-events",
+                "--db",
+                str(tmp_path / "s.db"),
+                "--source-id",
+                "dm:test",
+                "--require-reaction-scopes",
+                "--no-drain",
+                "--json",
+            ]
+        )
+    assert exit_code == 2
+    err_payload = json.loads(capsys.readouterr().out)
+    assert err_payload["error"] == "reaction_scope_preflight_failed"
+    assert err_payload["preflight"]["result"] == "scope_missing"
 
 
 def test_doctor_human_readable_output(
