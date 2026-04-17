@@ -411,21 +411,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip draining ready chat-intake rows into raw_messages (default: drain after stdin)",
     )
-    sync_events_parser.add_argument(
-        "--max-reactions-per-run",
-        type=int,
-        default=0,
-        help=(
-            "Defer validated IM reaction envelopes after N per stdin batch "
-            "(0=unlimited; persists deferral rows)"
-        ),
-    )
-    sync_events_parser.add_argument(
-        "--max-reactions-per-source",
-        type=int,
-        default=0,
-        help="Defer validated reaction envelopes for --source-id after N per batch (0=unlimited)",
-    )
     sync_events_parser.set_defaults(handler=_handle_sync_events)
 
     return parser
@@ -1384,10 +1369,9 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
 
     import sys
 
-    from lark_to_notes.intake.reaction_caps import ReactionIntakeCaps, ReactionIntakeCapState
     from lark_to_notes.live.chat_events import ingest_chat_event_ndjson_lines
     from lark_to_notes.runtime.executor import drain_ready_chat_intake
-    from lark_to_notes.runtime.registry import finish_run, health_report, start_run
+    from lark_to_notes.runtime.registry import health_report
     from lark_to_notes.runtime.retry import RetryPolicy
 
     db_path: Path = args.db
@@ -1396,45 +1380,15 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
     init_db(conn)
     chat_id_override: str | None = args.chat_id
     coalesce_window_seconds: int = int(args.coalesce_window_seconds)
-    caps = ReactionIntakeCaps(
-        max_reaction_envelopes_per_run=int(args.max_reactions_per_run),
-        max_reaction_envelopes_per_source_per_run=int(args.max_reactions_per_source),
+    outcome = ingest_chat_event_ndjson_lines(
+        conn,
+        sys.stdin,
+        source_id=str(args.source_id),
+        worker_source_type=str(args.worker_source_type),
+        chat_type=str(args.chat_type),
+        chat_id_override=chat_id_override,
+        coalesce_window_seconds=coalesce_window_seconds,
     )
-    cap_state = ReactionIntakeCapState()
-    reaction_intake_run_id: str | None = None
-    if caps.limits_active:
-        reaction_intake_run_id = start_run(conn, "sync-events-ndjson").run_id
-    try:
-        outcome = ingest_chat_event_ndjson_lines(
-            conn,
-            sys.stdin,
-            source_id=str(args.source_id),
-            worker_source_type=str(args.worker_source_type),
-            chat_type=str(args.chat_type),
-            chat_id_override=chat_id_override,
-            coalesce_window_seconds=coalesce_window_seconds,
-            caps=caps,
-            cap_state=cap_state,
-            reaction_intake_run_id=reaction_intake_run_id,
-        )
-    except BaseException:
-        if reaction_intake_run_id:
-            finish_run(
-                conn,
-                reaction_intake_run_id,
-                items_failed=1,
-                error="sync-events ndjson ingest raised",
-            )
-        raise
-    else:
-        if reaction_intake_run_id:
-            finish_run(
-                conn,
-                reaction_intake_run_id,
-                items_processed=int(outcome.chat_envelopes_ingested)
-                + int(outcome.reaction_rows_inserted)
-                + int(outcome.reaction_cap_deferred),
-            )
     drain_processed = 0
     batch = None
     if not args.no_drain:
@@ -1457,9 +1411,6 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
         "reaction_validation_rejects": outcome.reaction_validation_rejects,
         "reaction_insert_exceptions": outcome.reaction_insert_exceptions,
         "reaction_parse_none_after_validate": outcome.reaction_parse_none_after_validate,
-        "reaction_cap_deferred": outcome.reaction_cap_deferred,
-        "last_reaction_cap_reason_code": outcome.last_reaction_cap_reason_code,
-        "reaction_intake_run_id": reaction_intake_run_id,
         "last_chat_quarantine_event_id": outcome.last_chat_quarantine_event_id,
         "last_chat_quarantine_payload_hash": outcome.last_chat_quarantine_payload_hash,
         "last_chat_quarantine_reason_code": outcome.last_chat_quarantine_reason_code,
