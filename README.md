@@ -300,6 +300,7 @@ uv run pytest
 | `replay-reactions` | Re-link orphan `message_reaction_events` rows after `raw_messages` exists | `uv run lark-to-notes replay-reactions --db var/lark-to-notes.db --json` (optional `--source-id` / `--progress-ndjson`; lw-pzj.13.1) |
 | `reaction-reclassify-map` | Print normative distill invalidation stages for policy vs governance bumps | `uv run lark-to-notes reaction-reclassify-map --json` (lw-pzj.13.2) |
 | `vault-reconcile-reactions` | Compare vault reaction machine blocks to SQLite ledger fingerprints | `uv run lark-to-notes vault-reconcile-reactions --db var/lark-to-notes.db path/to/note.md --json` (optional `--write` to rewrite drifted blocks; lw-pzj.13.3) |
+| `ci_reactions_gate.py` | Aggregate CI: ruff, format, mypy, pytest, reaction E2E harness, doctor subset | `uv run python scripts/ci_reactions_gate.py` (`--only doctor` for a fast check; `ARTIFACT_DIR` for harness artifacts; lw-pzj.10.12) |
 
 Notes on the live commands:
 
@@ -310,6 +311,25 @@ Notes on the live commands:
 - `reaction-backfill` walks `raw_messages` for a watched `source_id` and calls `lark-cli im reactions list` with resumable checkpoints in SQLite (`lw-pzj.6.2`); optional `--dry-run`, `--since`, and `--chat-id` scope the scan (`lw-pzj.6.4`). It shares the same `{parent-of---db}/lark-to-notes.runtime.lock` as `sync-events` / drain paths.
 - `sync-once`, `sync-daemon`, and `backfill` require a working `lark-cli` install and credentials with access to the configured sources; `sync-events` only needs stdin (often fed by `lark-cli` in another process)
 - operator smoke / CI: `uv run python scripts/verify_live_adapter.py` exercises `doctor` plus `sync-events` with structured stderr; add `--artifacts-dir` to retain `verify_live_steps.jsonl` for dashboards or failure triage (see `tests/test_integration_logging.py`)
+- **CI reactions gate (lw-pzj.10.12):** canonical pre-merge sequence (ruff, format check, mypy, pytest, `scripts/reaction_e2e_harness.py`, doctor JSON subset vs `tests/fixtures/ci-gate/doctor_subset.json`):
+  ```bash
+  uv run python scripts/ci_reactions_gate.py
+  ```
+  Fast doctor-only check: `uv run python scripts/ci_reactions_gate.py --only doctor`. Set `ARTIFACT_DIR` to retain E2E harness outputs on workers.
+
+### Operator runbook (reactions)
+
+1. **Preflight / scopes:** run `doctor --json` and read `reaction_pipeline_health.status` (`blocked_missing_scope` vs healthy empty streams).
+2. **Live capture:** pipe `lark-cli event +subscribe …` NDJSON into `sync-events` (see Command Reference); inspect JSON counters for `reaction_rows_inserted` / quarantine fields.
+3. **Gap repair:** optional `reaction-backfill` (use `--dry-run` first), then `replay-reactions` if orphan rows wait on parent `raw_messages`.
+4. **Vault drift:** `vault-reconcile-reactions` on affected notes (`--write` only after reviewing `--json` output).
+5. **CI / release:** run `uv run python scripts/ci_reactions_gate.py` before merge.
+
+### FAQ (reactions)
+
+- **Emoji meaning:** distillation treats reactions as evidence, not standalone assignments; ambiguous reads land in `needs_review` when policy requires it.
+- **False positives / empty streams:** distinguish `reaction_pipeline_health` deferrals and cap counters from “healthy zero traffic”; use doctor `cap_and_deferral` and `signals`.
+- **Review policy:** machine-owned vault blocks and distill outputs are safe to regenerate from SQLite; human prose outside those blocks is never rewritten by reconcile or replay tooling.
 
 #### Live adapter validation matrix
 

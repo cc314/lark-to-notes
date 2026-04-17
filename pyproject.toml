@@ -65,6 +65,7 @@ ignore = [
 "src/lark_to_notes/runtime/reconcile.py" = ["TCH003"]
 "src/lark_to_notes/runtime/registry.py" = ["TCH003"]
 "src/lark_to_notes/intake/reaction_backfill.py" = ["S608"]
+"scripts/ci_reactions_gate.py" = ["S603"]
 
 [tool.mypy]
 python_version = "3.12"

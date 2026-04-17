@@ -126,6 +126,9 @@ uv run ty check --strict
 
 # Tests
 uv run pytest
+
+# Reactions CI aggregation (ruff, format, mypy, pytest, reaction E2E harness, doctor subset)
+uv run python scripts/ci_reactions_gate.py
 ```
 
 Additional rules:

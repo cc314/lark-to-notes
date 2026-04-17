@@ -1,0 +1,18 @@
+{
+  "status": "ok",
+  "schema_version": 14,
+  "reaction_pipeline_health": {
+    "status": "healthy",
+    "counts": {
+      "reaction_events_ingested": 0
+    },
+    "cap_and_deferral": {
+      "deferral_row_count": 0
+    }
+  },
+  "message_reaction_events": {
+    "row_count": 0,
+    "orphan_row_count": 0,
+    "linked_row_count": 0
+  }
+}
