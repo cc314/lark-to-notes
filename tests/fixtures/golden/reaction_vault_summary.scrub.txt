@@ -3,6 +3,8 @@ Golden scrub policy (lw-pzj.10.4, lw-pzj.7.1)
 This fixture uses fixed source_id/message_id strings so the ltn-rx-* block id
 suffix is stable (SHA-256 prefix over "source\\nmessage"). The H2 repeats that
 id as an Obsidian ``^block`` anchor for back-links. Summary holds governance
-tuple + effective-count table; Timeline is placeholder until ledger projection
-lands. No timestamps in v1 summaries; if future renderers add temporal fields,
-normalize ISO-8601 or epoch milliseconds to placeholders before diffing.
+tuple + effective-count table; Provenance carries deterministic SHA-256
+fingerprints plus optional ``last_ledger_event_id`` / ``last_ingested_at`` (ISO
+strings). Timeline is placeholder until ledger projection lands. For golden
+diffs, scrub volatile ISO timestamps if fixtures ever adopt live clocks;
+fingerprints here are fixed from canonical inputs.

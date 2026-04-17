@@ -30,6 +30,7 @@ from lark_to_notes.render.reaction_vault import (
     format_reaction_summary_markdown,
     reaction_block_id,
     reaction_primary_heading,
+    reaction_vault_projection_fingerprint,
 )
 from lark_to_notes.render.writer import NoteWriter
 
@@ -49,6 +50,7 @@ __all__ = [
     "make_end_marker",
     "reaction_block_id",
     "reaction_primary_heading",
+    "reaction_vault_projection_fingerprint",
     "remove_demoted_blocks",
     "render_current_tasks",
     "render_current_tasks_item",
