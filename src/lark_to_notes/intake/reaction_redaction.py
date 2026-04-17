@@ -32,7 +32,7 @@ def redact_reaction_envelope_for_logs(
     """Return a JSON-round-trippable copy of *envelope* for operator surfaces."""
 
     if mode is ReactionDisclosureMode.FULL:
-        return cast(dict[str, Any], json.loads(json.dumps(envelope, ensure_ascii=False)))
+        return cast("dict[str, Any]", json.loads(json.dumps(envelope, ensure_ascii=False)))
     redacted = copy.deepcopy(envelope)
     event = redacted.get("event")
     if isinstance(event, dict):

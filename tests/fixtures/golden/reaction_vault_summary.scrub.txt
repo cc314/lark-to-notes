@@ -1,0 +1,6 @@
+Golden scrub policy (lw-pzj.10.4)
+--------------------------------
+This fixture uses fixed source_id/message_id strings so the ltn-rx-* block id
+suffix is stable (SHA-256 prefix over "source\\nmessage"). No timestamps appear
+in v1 summaries; if future renderers add temporal fields, normalize ISO-8601
+or epoch milliseconds to placeholders before diffing.

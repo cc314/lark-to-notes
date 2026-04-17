@@ -67,10 +67,13 @@ def test_reaction_envelope_quarantine_log_includes_operator_fields(
     assert isinstance(excerpt, str) and len(excerpt) <= 257
 
 
-def test_reaction_cap_deferral_log_includes_operator_fields(caplog: pytest.LogCaptureFixture) -> None:
+def test_reaction_cap_deferral_log_includes_operator_fields(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Cap deferral logs reason_code, payload_hash, run_id, and excerpt for triage."""
 
     caplog.set_level(logging.INFO, logger="lark_to_notes.live.chat_events")
+
     def _env(eid: str) -> dict[str, object]:
         return {
             "header": {"event_type": "im.message.reaction.created_v1", "event_id": eid},
