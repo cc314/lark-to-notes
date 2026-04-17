@@ -664,6 +664,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         latest_message_reaction_event_seen_at,
         reaction_attach_reconcile_latency_ms,
         reaction_correlation_counts,
+        reaction_ledger_governance_sample_for_doctor,
         reaction_orphan_backlog_metrics,
     )
     from lark_to_notes.runtime.models import RunStatus
@@ -722,6 +723,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         runtime_db_path=runtime_db_path,
         fixture_corpus_root=corpus.root,
     )
+    governance_ledger_sample = reaction_ledger_governance_sample_for_doctor(runtime_conn)
     reaction_pipeline_health = {
         "status": reaction_pipeline_status,
         "counts": {
@@ -741,11 +743,15 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "completed_run_error_rate": runtime_health.error_rate,
         },
         "artifact_links": reaction_artifact_links,
+        "governance_ledger_sample": governance_ledger_sample,
         "notes": (
             "Quarantined per-reaction, vault-rendered, and distilled counts are "
             "reserved for later pipeline stages; deferrals and ingest timestamps "
             "are populated from SQLite today (lw-pzj.9.1). Use ``artifact_links`` "
-            "for DB paths, replay roots, and argv templates (lw-pzj.9.2)."
+            "for DB paths, replay roots, and argv templates (lw-pzj.9.2). "
+            "``governance_ledger_sample`` aggregates stamped governance/policy "
+            "tuples from ``message_reaction_events`` plus ``compare_as_of`` "
+            "(expected vs dominant ledger tuple, mismatch flag) (lw-pzj.9.4)."
         ),
     }
     payload = {
@@ -833,6 +839,15 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "reaction_pipeline_health: "
             f"status={reaction_pipeline_status} "
             f"deferrals={defer_metrics['deferral_row_count']}"
+        )
+        gls = governance_ledger_sample
+        ca = gls["compare_as_of"]
+        print(
+            "reaction_governance_sample: "
+            f"drift={gls['hints']['drift_from_builtin_governance']} "
+            f"mismatch={ca['mismatch_vs_runtime_intake_caps']} "
+            f"tuples={len(gls['tuples'])} "
+            "(see `doctor --json` → reaction_pipeline_health.governance_ledger_sample)"
         )
         replay_dirs = reaction_artifact_links["replay_directories"]
         print(

@@ -1579,6 +1579,12 @@ def test_doctor_json_has_all_expected_keys(
     assert "argv_templates" in al
     assert "doctor_json" in al["argv_templates"]
     assert "replay_fixture_corpus" in al["argv_templates"]
+    gls = rph["governance_ledger_sample"]
+    assert gls["tuples"] == []
+    assert gls["hints"]["drift_from_builtin_governance"] is False
+    assert gls["compare_as_of"]["mismatch_vs_runtime_intake_caps"] is False
+    assert gls["compare_as_of"]["dominant_ledger_tuple"] is None
+    assert "sampling" in gls and gls["sampling"]["method"]
 
 
 def test_reaction_pipeline_doctor_status_precedence() -> None:
@@ -1745,4 +1751,5 @@ def test_doctor_human_readable_output(
     assert "reaction_events:" in out
     assert "reaction_orphan_queue:" in out
     assert "reaction_artifact_links:" in out
+    assert "reaction_governance_sample:" in out
     assert "supervised_live:" in out

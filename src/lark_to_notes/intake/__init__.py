@@ -65,6 +65,7 @@ from lark_to_notes.intake.reaction_store import (
     latest_message_reaction_event_seen_at,
     reaction_attach_reconcile_latency_ms,
     reaction_correlation_counts,
+    reaction_ledger_governance_sample_for_doctor,
     reaction_orphan_backlog_metrics,
     surrogate_reaction_event_id,
 )
@@ -119,6 +120,7 @@ __all__ = [
     "reaction_event_id_from_envelope",
     "reaction_event_type",
     "reaction_intake_deferral_metrics",
+    "reaction_ledger_governance_sample_for_doctor",
     "reaction_orphan_backlog_metrics",
     "start_intake_run",
     "surrogate_reaction_event_id",

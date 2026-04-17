@@ -17,6 +17,7 @@ from lark_to_notes.intake.reaction_store import (
     insert_message_reaction_event,
     reaction_attach_reconcile_latency_ms,
     reaction_correlation_counts,
+    reaction_ledger_governance_sample_for_doctor,
     reaction_orphan_backlog_metrics,
     surrogate_reaction_event_id,
 )
@@ -76,6 +77,54 @@ def test_insert_stamps_governance_and_policy_versions(mem: sqlite3.Connection) -
     assert row is not None
     assert row["governance_version"] == "gov_x"
     assert row["policy_version"] == "pol_y"
+
+
+def test_governance_sample_for_doctor_detects_drift(mem: sqlite3.Connection) -> None:
+    insert_message_reaction_event(mem, _event(eid="a1"), governance_version="1", policy_version="")
+    insert_message_reaction_event(
+        mem, _event(eid="a2"), governance_version="legacy-x", policy_version=""
+    )
+    sample = reaction_ledger_governance_sample_for_doctor(mem, limit=10)
+    assert sample["hints"]["drift_from_builtin_governance"] is True
+    assert sample["compare_as_of"]["mismatch_vs_runtime_intake_caps"] is True
+    dom = sample["compare_as_of"]["dominant_ledger_tuple"]
+    assert dom is not None
+    assert dom["row_count"] == 1
+    versions = {t["governance_version"] for t in sample["tuples"]}
+    assert "1" in versions
+    assert "legacy-x" in versions
+
+
+def test_governance_sample_compare_as_of_no_mismatch_when_builtin_aligned(
+    mem: sqlite3.Connection,
+) -> None:
+    from lark_to_notes.intake.reaction_caps import (
+        REACTION_INTAKE_GOVERNANCE_VERSION,
+        REACTION_INTAKE_POLICY_VERSION,
+    )
+
+    insert_message_reaction_event(
+        mem,
+        _event(eid="b1"),
+        governance_version=REACTION_INTAKE_GOVERNANCE_VERSION,
+        policy_version=REACTION_INTAKE_POLICY_VERSION,
+    )
+    sample = reaction_ledger_governance_sample_for_doctor(mem, limit=10)
+    assert sample["compare_as_of"]["mismatch_vs_runtime_intake_caps"] is False
+    assert sample["hints"]["drift_from_builtin_governance"] is False
+
+
+def test_governance_sample_policy_drift_triggers_mismatch(mem: sqlite3.Connection) -> None:
+    from lark_to_notes.intake.reaction_caps import REACTION_INTAKE_GOVERNANCE_VERSION
+
+    insert_message_reaction_event(
+        mem,
+        _event(eid="c1"),
+        governance_version=REACTION_INTAKE_GOVERNANCE_VERSION,
+        policy_version="pinned-policy-x",
+    )
+    sample = reaction_ledger_governance_sample_for_doctor(mem, limit=10)
+    assert sample["compare_as_of"]["mismatch_vs_runtime_intake_caps"] is True
 
 
 def test_insert_idempotent(mem: sqlite3.Connection) -> None:

@@ -176,6 +176,97 @@ def reaction_correlation_counts(conn: sqlite3.Connection) -> dict[str, int]:
     }
 
 
+def reaction_ledger_governance_sample_for_doctor(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 8,
+) -> dict[str, Any]:
+    """Aggregate ``(governance_version, policy_version)`` counts for ``doctor --json`` (lw-pzj.9.4).
+
+    Uses **GROUP BY** only (no message ids or payloads) so the snapshot stays
+    privacy-safe. Ordering is lexicographic for deterministic output.
+    """
+
+    from lark_to_notes.intake.reaction_caps import REACTION_INTAKE_GOVERNANCE_VERSION
+
+    lim = max(1, min(int(limit), 50))
+    rows = conn.execute(
+        """
+        SELECT governance_version AS gv, policy_version AS pv, COUNT(*) AS n
+        FROM message_reaction_events
+        GROUP BY governance_version, policy_version
+        ORDER BY governance_version ASC, policy_version ASC, n DESC
+        LIMIT ?
+        """,
+        (lim,),
+    ).fetchall()
+    tuple_counts: list[dict[str, str | int]] = [
+        {
+            "governance_version": str(r["gv"] or ""),
+            "policy_version": str(r["pv"] or ""),
+            "row_count": int(r["n"]),
+        }
+        for r in rows
+    ]
+    builtin_gv = REACTION_INTAKE_GOVERNANCE_VERSION
+    builtin_pv = ""
+    rows_with_explicit_gv = sum(
+        int(t["row_count"]) for t in tuple_counts if str(t["governance_version"]) != ""
+    )
+    rows_matching_builtin = sum(
+        int(t["row_count"]) for t in tuple_counts if str(t["governance_version"]) == builtin_gv
+    )
+    drift_from_builtin_governance = False
+    for t in tuple_counts:
+        gv = str(t["governance_version"])
+        rc = int(t["row_count"])
+        if gv not in ("", builtin_gv) and rc > 0:
+            drift_from_builtin_governance = True
+            break
+    policy_drift_from_builtin = any(
+        str(t["policy_version"]) != builtin_pv for t in tuple_counts if int(t["row_count"]) > 0
+    )
+    mismatch_vs_runtime_intake_caps = drift_from_builtin_governance or policy_drift_from_builtin
+    dominant_ledger_tuple: dict[str, Any] | None
+    if tuple_counts:
+        dom = max(tuple_counts, key=lambda t: int(t["row_count"]))
+        dominant_ledger_tuple = {
+            "governance_version": str(dom["governance_version"]),
+            "policy_version": str(dom["policy_version"]),
+            "row_count": int(dom["row_count"]),
+        }
+    else:
+        dominant_ledger_tuple = None
+    return {
+        "sampling": {
+            "method": "group_by_governance_policy_lexicographic",
+            "limit": lim,
+            "note": (
+                "Deterministic SQL ORDER BY (governance_version, policy_version, count); "
+                "counts only — no message identifiers or reaction payloads."
+            ),
+        },
+        "tuples": tuple_counts,
+        "runtime_builtin_governance_version": builtin_gv,
+        "runtime_builtin_policy_version": builtin_pv,
+        "row_counts": {
+            "explicit_governance_version": rows_with_explicit_gv,
+            "matching_builtin_governance_version": rows_matching_builtin,
+        },
+        "hints": {
+            "drift_from_builtin_governance": drift_from_builtin_governance,
+        },
+        "compare_as_of": {
+            "expected_tuple": {
+                "governance_version": builtin_gv,
+                "policy_version": builtin_pv,
+            },
+            "dominant_ledger_tuple": dominant_ledger_tuple,
+            "mismatch_vs_runtime_intake_caps": mismatch_vs_runtime_intake_caps,
+        },
+    }
+
+
 def surrogate_reaction_event_id(event: NormalizedReactionEvent) -> str:
     """Build a deterministic surrogate primary key when ``event_id`` is absent.
 
