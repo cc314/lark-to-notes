@@ -1,13 +1,13 @@
 """Serialized note writer — the safe entry point for all vault writes.
 
 All vault mutations from the render layer must go through this module.
-The writer uses a simple in-process lock (:class:`threading.Lock`) to
-prevent concurrent writes to the same note.  This matches the plan's
-requirement that the note writer remain serialized.
-
-For multi-process safety, an advisory file lock should be layered on top
-(that belongs to lw-nss.10 runtime operations).  This module provides the
-intra-process guarantee.
+The writer uses a :class:`threading.Lock` to serialize calls on a single
+instance.  :meth:`~NoteWriter.merge_raw_machine_block` additionally takes a
+per-target POSIX ``flock`` via :class:`~lark_to_notes.runtime.lock.RuntimeLock`
+so **distinct** :class:`NoteWriter` instances (or other processes using the same
+convention) cannot interleave read-modify-write on the same raw note
+(lw-pzj.10.8).  On platforms without ``fcntl``, the file lock is a documented
+no-op and cross-process merges are not guarded.
 
 IM reaction summaries (and other machine blocks in ``raw/``) should be
 merged with :meth:`NoteWriter.merge_raw_machine_block` so updates stay
@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import threading
 from pathlib import Path
@@ -34,8 +35,22 @@ from lark_to_notes.render.current_tasks import render_current_tasks_item
 from lark_to_notes.render.daily import render_daily_note
 from lark_to_notes.render.models import RenderItem, RenderOutcome, RenderResult, RenderSurface
 from lark_to_notes.render.raw import render_raw_note
+from lark_to_notes.runtime.lock import RuntimeLock
 
 logger = logging.getLogger(__name__)
+
+
+def _raw_machine_block_lock_path(vault_root: Path, target: Path) -> Path:
+    """Per-target advisory lock file for :meth:`NoteWriter.merge_raw_machine_block`.
+
+    ``threading.Lock`` on :class:`NoteWriter` only serializes calls through the
+    same instance; separate writers (or processes) must coordinate on the
+    same path via ``flock`` (lw-pzj.10.8).
+    """
+
+    rel = target.resolve().relative_to(vault_root.resolve())
+    digest = hashlib.sha256(str(rel).encode("utf-8")).hexdigest()[:32]
+    return vault_root / "var" / "raw-block-locks" / f"{digest}.lock"
 
 
 class NoteWriter:
@@ -96,64 +111,67 @@ class NoteWriter:
                 entity_id=rid,
                 error="raw note does not exist",
             )
-        with self._lock:
-            try:
-                before = target.read_text(encoding="utf-8")
-            except OSError as exc:
-                return RenderResult(
-                    surface=RenderSurface.RAW,
-                    outcome=RenderOutcome.FAILED,
-                    target_path=str(target),
-                    block_id=block_id,
-                    entity_id=rid,
-                    error=str(exc),
-                )
-            try:
-                after = replace_block(before, block_id, inner_markdown)
-            except MalformedBlockError as exc:
-                return RenderResult(
-                    surface=RenderSurface.RAW,
-                    outcome=RenderOutcome.FAILED,
-                    target_path=str(target),
-                    block_id=block_id,
-                    entity_id=rid,
-                    error=str(exc),
-                )
-            if after == before:
-                return RenderResult(
-                    surface=RenderSurface.RAW,
-                    outcome=RenderOutcome.SKIPPED,
-                    target_path=str(target),
-                    block_id=block_id,
-                    entity_id=rid,
-                )
-            try:
-                target.write_text(after, encoding="utf-8")
-            except OSError as exc:
-                return RenderResult(
-                    surface=RenderSurface.RAW,
-                    outcome=RenderOutcome.FAILED,
-                    target_path=str(target),
-                    block_id=block_id,
-                    entity_id=rid,
-                    error=str(exc),
-                )
-        logger.info(
-            "note_writer_raw_block_merge",
-            extra={
-                "outcome": RenderOutcome.UPDATED,
-                "target_path": str(target),
-                "block_id": block_id,
-                "entity_id": rid,
-            },
-        )
-        return RenderResult(
-            surface=RenderSurface.RAW,
-            outcome=RenderOutcome.UPDATED,
-            target_path=str(target),
-            block_id=block_id,
-            entity_id=rid,
-        )
+        lock_path = _raw_machine_block_lock_path(root, target)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with RuntimeLock(lock_path, owner_tag=f"merge_raw:{rid}"):
+            with self._lock:
+                try:
+                    before = target.read_text(encoding="utf-8")
+                except OSError as exc:
+                    return RenderResult(
+                        surface=RenderSurface.RAW,
+                        outcome=RenderOutcome.FAILED,
+                        target_path=str(target),
+                        block_id=block_id,
+                        entity_id=rid,
+                        error=str(exc),
+                    )
+                try:
+                    after = replace_block(before, block_id, inner_markdown)
+                except MalformedBlockError as exc:
+                    return RenderResult(
+                        surface=RenderSurface.RAW,
+                        outcome=RenderOutcome.FAILED,
+                        target_path=str(target),
+                        block_id=block_id,
+                        entity_id=rid,
+                        error=str(exc),
+                    )
+                if after == before:
+                    return RenderResult(
+                        surface=RenderSurface.RAW,
+                        outcome=RenderOutcome.SKIPPED,
+                        target_path=str(target),
+                        block_id=block_id,
+                        entity_id=rid,
+                    )
+                try:
+                    target.write_text(after, encoding="utf-8")
+                except OSError as exc:
+                    return RenderResult(
+                        surface=RenderSurface.RAW,
+                        outcome=RenderOutcome.FAILED,
+                        target_path=str(target),
+                        block_id=block_id,
+                        entity_id=rid,
+                        error=str(exc),
+                    )
+            logger.info(
+                "note_writer_raw_block_merge",
+                extra={
+                    "outcome": RenderOutcome.UPDATED,
+                    "target_path": str(target),
+                    "block_id": block_id,
+                    "entity_id": rid,
+                },
+            )
+            return RenderResult(
+                surface=RenderSurface.RAW,
+                outcome=RenderOutcome.UPDATED,
+                target_path=str(target),
+                block_id=block_id,
+                entity_id=rid,
+            )
 
     def render_raw(self, item: RenderItem) -> RenderResult:
         """Write or update the raw provenance note for *item*.
