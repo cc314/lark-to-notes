@@ -12,12 +12,24 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 
 from lark_to_notes.intake.ledger import chat_ingest_key
 from lark_to_notes.intake.reaction_model import NormalizedReactionEvent
 
 ReactionIntakePath = Literal["event", "poll", "backfill"]
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def count_reaction_orphan_queue(conn: sqlite3.Connection) -> int:
+    """Return row count in ``reaction_orphan_queue`` (reactions awaiting parent raw)."""
+
+    row = conn.execute("SELECT COUNT(*) AS c FROM reaction_orphan_queue").fetchone()
+    return int(row["c"] if row is not None else 0)
 
 
 @dataclass(frozen=True)
@@ -159,10 +171,24 @@ def insert_message_reaction_event(
             raw_present,
         ),
     )
+    inserted = cur.rowcount == 1
+    if raw_present == 0:
+        ts = _utcnow_iso()
+        conn.execute(
+            """
+            INSERT INTO reaction_orphan_queue (
+                reaction_event_id, source_id, message_id, first_queued_at, last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(reaction_event_id) DO UPDATE SET
+                last_seen_at = excluded.last_seen_at
+            """,
+            (rid, event.source_id, event.message_id, ts, ts),
+        )
     conn.commit()
     return ReactionInsertResult(
         reaction_event_id=rid,
-        inserted=cur.rowcount == 1,
+        inserted=inserted,
         chat_ingest_fingerprint=ingest_fp,
         raw_message_present=raw_present == 1,
     )

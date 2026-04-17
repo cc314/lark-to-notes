@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -430,6 +430,41 @@ CREATE INDEX IF NOT EXISTS idx_reaction_intake_deferral_run_source
     ON reaction_intake_deferrals (run_id, source_id);
 """
 
+# ---------------------------------------------------------------------------
+# Version 12 — explicit orphan queue for reactions ahead of parent raw rows
+# ---------------------------------------------------------------------------
+#
+# Rows mirror ``message_reaction_events`` where ``raw_message_present = 0`` at
+# insert time (lw-pzj.15.1). Queue entries are removed when linkage flips the
+# reaction row to ``raw_message_present = 1`` (see intake ledger).
+
+_V12_DDL = """
+CREATE TABLE IF NOT EXISTS reaction_orphan_queue (
+    reaction_event_id TEXT PRIMARY KEY,
+    source_id         TEXT NOT NULL,
+    message_id        TEXT NOT NULL,
+    first_queued_at   TEXT NOT NULL
+                          DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    last_seen_at      TEXT NOT NULL
+                          DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reaction_orphan_queue_pair
+    ON reaction_orphan_queue (source_id, message_id);
+
+INSERT OR IGNORE INTO reaction_orphan_queue (
+    reaction_event_id, source_id, message_id, first_queued_at, last_seen_at
+)
+SELECT
+    reaction_event_id,
+    source_id,
+    message_id,
+    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+FROM message_reaction_events
+WHERE raw_message_present = 0;
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
@@ -442,6 +477,7 @@ _MIGRATIONS: dict[int, str] = {
     9: _V9_DDL,
     10: _V10_DDL,
     11: _V11_DDL,
+    12: _V12_DDL,
 }
 
 

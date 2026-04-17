@@ -108,8 +108,14 @@ def _chat_msg(
 
 
 class TestSchemaV5:
-    def test_schema_version_is_11(self) -> None:
-        assert SCHEMA_VERSION == 11
+    def test_schema_version_is_12(self) -> None:
+        assert SCHEMA_VERSION == 12
+
+    def test_reaction_orphan_queue_table_exists(self, conn) -> None:  # type: ignore[no-untyped-def]
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='reaction_orphan_queue'"
+        ).fetchone()
+        assert row is not None
 
     def test_runtime_runs_table_exists(self, conn) -> None:  # type: ignore[no-untyped-def]
         row = conn.execute(

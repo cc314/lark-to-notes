@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 import pytest
 
-from lark_to_notes.intake.ledger import chat_ingest_key
+from lark_to_notes.intake.ledger import chat_ingest_key, insert_raw_message
+from lark_to_notes.intake.models import RawMessage
 from lark_to_notes.intake.reaction_model import NormalizedReactionEvent, ReactionKind
 from lark_to_notes.intake.reaction_store import (
     canonical_reaction_event_id,
+    count_reaction_orphan_queue,
     insert_message_reaction_event,
     reaction_correlation_counts,
     surrogate_reaction_event_id,
@@ -222,3 +225,138 @@ def test_reaction_correlation_counts_join(mem: sqlite3.Connection) -> None:
         "linked_to_raw_message": 1,
         "orphan": 0,
     }
+
+
+def test_insert_raw_message_reconciliation_log_extra_fields(
+    mem: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``insert_raw_message`` emits structured ``reaction_orphan_reconciled`` (lw-pzj.15.2)."""
+
+    caplog.set_level(logging.INFO, "lark_to_notes.intake.ledger")
+    insert_message_reaction_event(mem, _event(eid="ev-orph-log"))
+    msg = RawMessage(
+        message_id="om_1",
+        source_id="dm:test",
+        source_type="dm_user",
+        chat_id="ou_c",
+        chat_type="p2p",
+        sender_id="ou_s",
+        sender_name="Bob",
+        direction="incoming",
+        created_at="2026-01-01T00:00:00Z",
+        content="hi",
+        payload={"content": "hi"},
+    )
+    assert insert_raw_message(mem, msg) is True
+    hits = [r for r in caplog.records if r.msg == "reaction_orphan_reconciled"]
+    assert len(hits) == 1
+    rec = hits[0]
+    assert len(getattr(rec, "orphan_batch_id", "")) == 32
+    assert rec.message_id == "om_1"
+    assert rec.source_id == "dm:test"
+    assert rec.attached_count == 1
+    assert rec.still_orphan == 0
+    assert rec.still_orphan_pair == 0
+    assert isinstance(rec.elapsed_ms, int | float)
+
+
+def test_insert_raw_message_links_preexisting_orphan_reactions(mem: sqlite3.Connection) -> None:
+    """Orphan reactions (no raw row at insert time) attach when ``insert_raw_message`` runs."""
+
+    insert_message_reaction_event(mem, _event(eid="ev-orph-link"))
+    assert count_reaction_orphan_queue(mem) == 1
+    row = mem.execute(
+        "SELECT raw_message_present FROM message_reaction_events WHERE reaction_event_id = ?",
+        ("ev-orph-link",),
+    ).fetchone()
+    assert int(row[0]) == 0
+    msg = RawMessage(
+        message_id="om_1",
+        source_id="dm:test",
+        source_type="dm_user",
+        chat_id="ou_c",
+        chat_type="p2p",
+        sender_id="ou_s",
+        sender_name="Bob",
+        direction="incoming",
+        created_at="2026-01-01T00:00:00Z",
+        content="hi",
+        payload={"content": "hi"},
+    )
+    assert insert_raw_message(mem, msg) is True
+    row2 = mem.execute(
+        "SELECT raw_message_present FROM message_reaction_events WHERE reaction_event_id = ?",
+        ("ev-orph-link",),
+    ).fetchone()
+    assert int(row2[0]) == 1
+    assert count_reaction_orphan_queue(mem) == 0
+
+
+def test_insert_raw_message_idempotent_still_links_orphans(mem: sqlite3.Connection) -> None:
+    """Second ``insert_raw_message`` (INSERT OR IGNORE) still runs linkage for the pair."""
+
+    insert_message_reaction_event(mem, _event(eid="ev-orph-idem"))
+    msg = RawMessage(
+        message_id="om_1",
+        source_id="dm:test",
+        source_type="dm_user",
+        chat_id="ou_c",
+        chat_type="p2p",
+        sender_id="ou_s",
+        sender_name="Bob",
+        direction="incoming",
+        created_at="2026-01-01T00:00:00Z",
+        content="hi",
+        payload={"content": "hi"},
+    )
+    assert insert_raw_message(mem, msg) is True
+    assert insert_raw_message(mem, msg) is False
+    row = mem.execute(
+        "SELECT raw_message_present FROM message_reaction_events WHERE reaction_event_id = ?",
+        ("ev-orph-idem",),
+    ).fetchone()
+    assert int(row[0]) == 1
+    assert count_reaction_orphan_queue(mem) == 0
+
+
+def test_orphan_queue_replay_updates_last_seen(mem: sqlite3.Connection) -> None:
+    """Duplicate inserts while still orphan bump ``last_seen_at`` only."""
+
+    ev = _event(eid="ev-orph-replay")
+    insert_message_reaction_event(mem, ev)
+    first = mem.execute(
+        "SELECT first_queued_at, last_seen_at FROM reaction_orphan_queue WHERE reaction_event_id = ?",
+        ("ev-orph-replay",),
+    ).fetchone()
+    assert first is not None
+    insert_message_reaction_event(mem, ev)
+    second = mem.execute(
+        "SELECT first_queued_at, last_seen_at FROM reaction_orphan_queue WHERE reaction_event_id = ?",
+        ("ev-orph-replay",),
+    ).fetchone()
+    assert second is not None
+    assert second["first_queued_at"] == first["first_queued_at"]
+    assert second["last_seen_at"] >= first["last_seen_at"]
+
+
+def test_linked_reaction_never_queues_orphan(mem: sqlite3.Connection) -> None:
+    """When ``raw_messages`` already has the parent, no orphan-queue row is created."""
+
+    mem.execute(
+        """
+        INSERT INTO raw_messages (
+            message_id, source_id, source_type, chat_id, chat_type,
+            sender_id, sender_name, direction, created_at, content, payload_json
+        )
+        VALUES (?, ?, 'dm', 'c1', 'p2p', '', '', 'incoming', '2026-01-01T00:00:00Z', '', '{}')
+        """,
+        ("om_1", "dm:test"),
+    )
+    mem.commit()
+    insert_message_reaction_event(mem, _event(eid="ev-linked"))
+    assert count_reaction_orphan_queue(mem) == 0
+    row = mem.execute(
+        "SELECT raw_message_present FROM message_reaction_events WHERE reaction_event_id = ?",
+        ("ev-linked",),
+    ).fetchone()
+    assert int(row[0]) == 1

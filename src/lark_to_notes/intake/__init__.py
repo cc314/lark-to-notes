@@ -56,6 +56,7 @@ from lark_to_notes.intake.reaction_model import (
 from lark_to_notes.intake.reaction_store import (
     ReactionInsertResult,
     canonical_reaction_event_id,
+    count_reaction_orphan_queue,
     insert_message_reaction_event,
     reaction_correlation_counts,
     surrogate_reaction_event_id,
@@ -82,6 +83,7 @@ __all__ = [
     "chat_intake_ledger_counts",
     "count_raw_messages",
     "count_reaction_intake_deferrals",
+    "count_reaction_orphan_queue",
     "document_ingest_key",
     "finish_intake_run",
     "get_chat_intake_item",

@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -41,11 +42,86 @@ def _utcnow_iso() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _link_pending_reactions_for_raw_pair(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    message_id: str,
+    orphan_batch_id: str,
+) -> None:
+    """Flip ``raw_message_present`` and dequeue orphans for one chat pair.
+
+    Reactions may be ingested before chat intake drains the parent message into
+    ``raw_messages`` (plan: Message reaction ingestion §4, lw-pzj.15).
+
+    This path only **updates** existing ``message_reaction_events`` rows and
+    deletes from ``reaction_orphan_queue`` — it never inserts duplicate reaction
+    identities. Emits structured ``reaction_orphan_reconciled`` log (lw-pzj.15.2).
+    Caller commits the transaction.
+    """
+
+    t0 = time.perf_counter()
+    cur = conn.execute(
+        """
+        UPDATE message_reaction_events
+        SET raw_message_present = 1
+        WHERE source_id = ? AND message_id = ?
+          AND raw_message_present = 0
+          AND EXISTS (
+              SELECT 1 FROM raw_messages AS m
+              WHERE m.message_id = ? AND m.source_id = ?
+          )
+        """,
+        (source_id, message_id, message_id, source_id),
+    )
+    attached = int(cur.rowcount) if cur.rowcount is not None and cur.rowcount >= 0 else 0
+    conn.execute(
+        """
+        DELETE FROM reaction_orphan_queue
+        WHERE reaction_event_id IN (
+            SELECT reaction_event_id FROM message_reaction_events
+            WHERE source_id = ? AND message_id = ? AND raw_message_present = 1
+        )
+        """,
+        (source_id, message_id),
+    )
+    pair_row = conn.execute(
+        """
+        SELECT COUNT(*) AS c FROM reaction_orphan_queue
+        WHERE source_id = ? AND message_id = ?
+        """,
+        (source_id, message_id),
+    ).fetchone()
+    total_row = conn.execute("SELECT COUNT(*) AS c FROM reaction_orphan_queue").fetchone()
+    still_pair = int(pair_row["c"] if pair_row is not None else 0)
+    still_global = int(total_row["c"] if total_row is not None else 0)
+    elapsed_s = time.perf_counter() - t0
+    logger.info(
+        "reaction_orphan_reconciled",
+        extra={
+            "orphan_batch_id": orphan_batch_id,
+            "message_id": message_id,
+            "source_id": source_id,
+            "attached_count": attached,
+            "still_orphan": still_global,
+            "still_orphan_pair": still_pair,
+            "elapsed_ms": round(elapsed_s * 1000.0, 3),
+        },
+    )
+
+
 def insert_raw_message(conn: sqlite3.Connection, message: RawMessage) -> bool:
     """Write a raw message to the ledger.
 
     The insert is ignored if the ``message_id`` already exists, making
     the operation fully idempotent.
+
+    After each call (whether the row was new or ignored), any
+    ``message_reaction_events`` rows for the same ``(source_id, message_id)``
+    that were waiting on ``raw_messages`` have ``raw_message_present`` updated
+    to ``1`` in the **same** transaction as the insert attempt, then the
+    connection commits once. Structured ``reaction_orphan_reconciled`` logs
+    record attach latency and orphan depth (lw-pzj.15.2).
 
     Args:
         conn: An open database connection.
@@ -55,6 +131,7 @@ def insert_raw_message(conn: sqlite3.Connection, message: RawMessage) -> bool:
         ``True`` if the row was inserted (new message), ``False`` if it
         was already present.
     """
+    orphan_batch_id = uuid.uuid4().hex
     cursor = conn.execute(
         """
         INSERT OR IGNORE INTO raw_messages
@@ -78,8 +155,14 @@ def insert_raw_message(conn: sqlite3.Connection, message: RawMessage) -> bool:
             message.ingested_at,
         ),
     )
-    conn.commit()
     inserted = cursor.rowcount > 0
+    _link_pending_reactions_for_raw_pair(
+        conn,
+        source_id=message.source_id,
+        message_id=message.message_id,
+        orphan_batch_id=orphan_batch_id,
+    )
+    conn.commit()
     logger.debug(
         "insert_raw_message",
         extra={
