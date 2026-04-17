@@ -8,9 +8,11 @@ from typing import Any
 
 from lark_to_notes.config.sources import ReactionBackfillCheckpoint, SourceType, WatchedSource
 from lark_to_notes.intake.reaction_backfill import (
+    count_raw_messages_after_watermark,
     execute_reaction_backfill,
     make_lark_cli_reactions_list_fetcher,
     reaction_list_item_to_normalized,
+    reaction_rest_backfill_doctor_block,
 )
 from lark_to_notes.intake.reaction_model import NormalizedReactionEvent, ReactionKind
 from lark_to_notes.storage.db import (
@@ -221,6 +223,70 @@ def test_execute_reaction_backfill_resumes_inflight_page_token() -> None:
         max_messages=1,
     )
     assert calls == ["PAGE1"]
+
+
+def test_count_raw_messages_after_watermark() -> None:
+    conn = _conn()
+    _seed_source(conn)
+    assert (
+        count_raw_messages_after_watermark(
+            conn, source_id="dm:ou_demo", watermark_created_at=None, watermark_message_id=None
+        )
+        == 0
+    )
+    _insert_raw(conn, message_id="om_a", created_at="2026-01-01T00:00:00Z")
+    _insert_raw(conn, message_id="om_b", created_at="2026-01-02T00:00:00Z")
+    _insert_raw(conn, message_id="om_c", created_at="2026-01-02T00:00:00Z")
+    assert (
+        count_raw_messages_after_watermark(
+            conn, source_id="dm:ou_demo", watermark_created_at=None, watermark_message_id=None
+        )
+        == 3
+    )
+    assert (
+        count_raw_messages_after_watermark(
+            conn,
+            source_id="dm:ou_demo",
+            watermark_created_at="2026-01-01T00:00:00Z",
+            watermark_message_id="om_a",
+        )
+        == 2
+    )
+    assert (
+        count_raw_messages_after_watermark(
+            conn,
+            source_id="dm:ou_demo",
+            watermark_created_at="2026-01-02T00:00:00Z",
+            watermark_message_id="om_b",
+        )
+        == 1
+    )
+
+
+def test_reaction_rest_backfill_doctor_block_per_source() -> None:
+    conn = _conn()
+    _seed_source(conn)
+    _insert_raw(conn, message_id="om_1", created_at="2026-02-01T00:00:00Z")
+    upsert_reaction_backfill_checkpoint(
+        conn,
+        ReactionBackfillCheckpoint(
+            source_id="dm:ou_demo",
+            watermark_created_at="2026-02-01T00:00:00Z",
+            watermark_message_id="om_1",
+            api_calls=3,
+            rows_inserted=1,
+            batches_completed=2,
+            last_error=None,
+        ),
+    )
+    blk = reaction_rest_backfill_doctor_block(conn)
+    assert len(blk["sources"]) == 1
+    s0 = blk["sources"][0]
+    assert s0["source_id"] == "dm:ou_demo"
+    assert s0["pending_raw_messages_after_watermark"] == 0
+    assert s0["api_calls_checkpointed_total"] == 3
+    assert s0["rows_inserted_checkpointed_total"] == 1
+    assert s0["batches_completed"] == 2
 
 
 def test_make_lark_cli_reactions_list_fetcher_builds_argv() -> None:

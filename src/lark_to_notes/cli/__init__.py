@@ -901,6 +901,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         },
         "artifact_links": reaction_artifact_links,
         "governance_ledger_sample": governance_ledger_sample,
+        "rest_backfill": rest_backfill,
         "notes": (
             "Quarantined per-reaction, vault-rendered, and distilled counts are "
             "reserved for later pipeline stages; deferrals and ingest timestamps "
@@ -908,7 +909,9 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "for DB paths, replay roots, and argv templates (lw-pzj.9.2). "
             "``governance_ledger_sample`` aggregates stamped governance/policy "
             "tuples from ``message_reaction_events`` plus ``compare_as_of`` "
-            "(expected vs dominant ledger tuple, mismatch flag) (lw-pzj.9.4)."
+            "(expected vs dominant ledger tuple, mismatch flag) (lw-pzj.9.4). "
+            "``rest_backfill`` summarizes ``reaction_backfill_checkpoints`` plus "
+            "estimated raw tail remaining per source (lw-pzj.6.3)."
         ),
     }
     payload = {
@@ -995,7 +998,8 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         print(
             "reaction_pipeline_health: "
             f"status={reaction_pipeline_status} "
-            f"deferrals={defer_metrics['deferral_row_count']}"
+            f"deferrals={defer_metrics['deferral_row_count']} "
+            f"rest_backfill_sources={len(rest_backfill['sources'])}"
         )
         gls = governance_ledger_sample
         ca = gls["compare_as_of"]

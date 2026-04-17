@@ -1627,6 +1627,18 @@ def test_doctor_json_has_all_expected_keys(
         assert key in ar, f"missing attach_reconcile_latency_ms key: {key!r}"
     assert ar["attach_reconcile_sample_count"] == 0
     rph = payload["reaction_pipeline_health"]
+    for key in (
+        "status",
+        "counts",
+        "timestamps",
+        "cap_and_deferral",
+        "signals",
+        "artifact_links",
+        "governance_ledger_sample",
+        "rest_backfill",
+        "notes",
+    ):
+        assert key in rph, f"missing reaction_pipeline_health key: {key!r}"
     assert rph["status"] == "healthy"
     assert rph["counts"]["reaction_events_ingested"] == 0
     assert rph["counts"]["reaction_events_quarantined"] is None
@@ -1650,6 +1662,11 @@ def test_doctor_json_has_all_expected_keys(
     assert gls["compare_as_of"]["mismatch_vs_runtime_intake_caps"] is False
     assert gls["compare_as_of"]["dominant_ledger_tuple"] is None
     assert "sampling" in gls and gls["sampling"]["method"]
+    rb = rph["rest_backfill"]
+    assert "lw-pzj.6.3" in rb["policy"]
+    assert "im.reactions.list" in rb["policy"]
+    assert rb["sources"] == []
+    assert "notes" in rb
 
 
 def test_reaction_pipeline_doctor_status_precedence() -> None:
