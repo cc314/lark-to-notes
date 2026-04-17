@@ -17,6 +17,13 @@ from lark_to_notes.distill.models import (
     PromotionRec,
     TaskClass,
 )
+from lark_to_notes.distill.reaction_rules import (
+    DEFAULT_REACTION_RULESET_VERSION,
+    UnknownReactionRulesetError,
+    default_reaction_ruleset,
+    get_reaction_ruleset,
+    reaction_ruleset_versions,
+)
 from lark_to_notes.distill.routing import classify_with_routing
 from lark_to_notes.storage.db import init_db
 
@@ -615,3 +622,36 @@ class TestRoutingGaps:
         long_no_signal = "context context context " * 40
         result = classify_with_routing(_inp(long_no_signal), llm_provider=None)
         assert result.reason_code.startswith("no_provider_")
+
+
+# ---------------------------------------------------------------------------
+# Reaction ruleset registry (lw-pzj.8.1)
+# ---------------------------------------------------------------------------
+
+
+class TestReactionRulesetRegistry:
+    def test_default_is_conservative_version_1(self) -> None:
+        rs = default_reaction_ruleset()
+        assert rs.version == DEFAULT_REACTION_RULESET_VERSION
+        assert rs.allow_emoji_only_promotion is False
+        assert rs.min_effective_total_count_for_task_signal >= 2
+
+    def test_get_by_version_round_trip(self) -> None:
+        assert get_reaction_ruleset("1") == default_reaction_ruleset()
+
+    def test_unknown_version_raises(self) -> None:
+        with pytest.raises(UnknownReactionRulesetError) as exc:
+            get_reaction_ruleset("no-such-ruleset")
+        assert exc.value.version == "no-such-ruleset"
+
+    def test_aggressive_ruleset_is_explicit_opt_in_counterexample(self) -> None:
+        aggressive = get_reaction_ruleset("2026-04-aggressive")
+        assert aggressive.allow_emoji_only_promotion is True
+        assert aggressive.min_effective_total_count_for_task_signal == 1
+        assert aggressive.migration_note
+
+    def test_versions_sorted_stable(self) -> None:
+        v = reaction_ruleset_versions()
+        assert v == tuple(sorted(v))
+        assert "1" in v
+        assert "2026-04-aggressive" in v

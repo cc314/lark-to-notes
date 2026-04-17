@@ -10,16 +10,30 @@ from lark_to_notes.distill.models import (
     PromotionRec,
     TaskClass,
 )
+from lark_to_notes.distill.reaction_rules import (
+    DEFAULT_REACTION_RULESET_VERSION,
+    ReactionRuleset,
+    UnknownReactionRulesetError,
+    default_reaction_ruleset,
+    get_reaction_ruleset,
+    reaction_ruleset_versions,
+)
 from lark_to_notes.distill.routing import LLMProvider, classify_with_routing
 
 __all__ = [
+    "DEFAULT_REACTION_RULESET_VERSION",
     "ClassifierResult",
     "ConfidenceBand",
     "DistillInput",
     "HeuristicClassifier",
     "LLMProvider",
     "PromotionRec",
+    "ReactionRuleset",
     "TaskClass",
+    "UnknownReactionRulesetError",
     "classify_with_routing",
     "default_classifier",
+    "default_reaction_ruleset",
+    "get_reaction_ruleset",
+    "reaction_ruleset_versions",
 ]
