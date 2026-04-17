@@ -472,6 +472,7 @@ br dep cycles
 - **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers 0-4, not words)
 - **Types**: task, bug, feature, epic, chore, docs, question
 - **Blocking**: `br dep add <issue> <depends-on>` to add dependencies
+- **Graph hygiene**: Do not add a **`blocks`** edge from a **parent epic** to a **downstream child** you intend to finish *after* earlier siblings (e.g. epic → last milestone). `br` propagates a parent’s open blockers to descendants, which freezes `br ready` (child N cannot start while the parent is “blocked by” child N+k). Prefer **child → child** `blocks` chains for sequencing; close the epic when the subtree is done.
 
 ### Session Protocol
 
