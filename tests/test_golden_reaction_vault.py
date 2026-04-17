@@ -9,7 +9,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from lark_to_notes.render.blocks import extract_block, make_begin_marker, replace_block
-from lark_to_notes.render.reaction_vault import format_reaction_summary_markdown, reaction_block_id
+from lark_to_notes.render.reaction_vault import (
+    VAULT_REACTION_SCHEMA_VERSION,
+    format_reaction_summary_markdown,
+    reaction_block_id,
+    reaction_primary_heading,
+)
 
 _FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "golden"
 _EXPECTED = _FIXTURE_DIR / "reaction_vault_summary.expected.md"
@@ -20,6 +25,12 @@ def test_reaction_block_id_is_stable_for_source_message_pair() -> None:
     assert reaction_block_id("dm:other", "om_golden_rx") != reaction_block_id(
         "dm:test", "om_golden_rx"
     )
+
+
+def test_reaction_primary_heading_embeds_obsidian_block_anchor() -> None:
+    bid = reaction_block_id("dm:test", "om_golden_rx")
+    assert reaction_primary_heading(bid) == f"## IM reactions ^{bid}"
+    assert VAULT_REACTION_SCHEMA_VERSION == "1"
 
 
 def test_reaction_summary_matches_golden_fixture() -> None:

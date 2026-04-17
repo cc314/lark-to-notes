@@ -1,6 +1,8 @@
-Golden scrub policy (lw-pzj.10.4)
---------------------------------
+Golden scrub policy (lw-pzj.10.4, lw-pzj.7.1)
+--------------------------------------------
 This fixture uses fixed source_id/message_id strings so the ltn-rx-* block id
-suffix is stable (SHA-256 prefix over "source\\nmessage"). No timestamps appear
-in v1 summaries; if future renderers add temporal fields, normalize ISO-8601
-or epoch milliseconds to placeholders before diffing.
+suffix is stable (SHA-256 prefix over "source\\nmessage"). The H2 repeats that
+id as an Obsidian ``^block`` anchor for back-links. Summary holds governance
+tuple + effective-count table; Timeline is placeholder until ledger projection
+lands. No timestamps in v1 summaries; if future renderers add temporal fields,
+normalize ISO-8601 or epoch milliseconds to placeholders before diffing.

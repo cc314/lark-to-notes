@@ -25,10 +25,16 @@ from lark_to_notes.render.models import (
     RenderTarget,
 )
 from lark_to_notes.render.raw import render_raw_note
-from lark_to_notes.render.reaction_vault import format_reaction_summary_markdown, reaction_block_id
+from lark_to_notes.render.reaction_vault import (
+    VAULT_REACTION_SCHEMA_VERSION,
+    format_reaction_summary_markdown,
+    reaction_block_id,
+    reaction_primary_heading,
+)
 from lark_to_notes.render.writer import NoteWriter
 
 __all__ = [
+    "VAULT_REACTION_SCHEMA_VERSION",
     "MalformedBlockError",
     "NoteWriter",
     "RenderItem",
@@ -42,6 +48,7 @@ __all__ = [
     "make_begin_marker",
     "make_end_marker",
     "reaction_block_id",
+    "reaction_primary_heading",
     "remove_demoted_blocks",
     "render_current_tasks",
     "render_current_tasks_item",
