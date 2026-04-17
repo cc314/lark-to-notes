@@ -874,6 +874,9 @@ def test_sync_events_stdin_ingests_receive_v1(
     assert payload["reaction_validation_rejects"] == 0
     assert payload["reaction_insert_exceptions"] == 0
     assert payload["reaction_parse_none_after_validate"] == 0
+    assert payload["reaction_cap_deferred"] == 0
+    assert payload["last_reaction_cap_reason_code"] is None
+    assert payload["reaction_intake_run_id"] is None
     assert payload["last_reaction_quarantine_payload_hash"] is None
     assert payload["chat_intake_drained"] == 0
     assert payload["drain_skipped"] is False
@@ -919,6 +922,9 @@ def test_sync_events_coalesce_zero_drains_ready_rows(
     assert payload["envelopes_ingested"] == 1
     assert payload["reaction_rows_inserted"] == 0
     assert payload["reaction_validation_rejects"] == 0
+    assert payload["reaction_cap_deferred"] == 0
+    assert payload["last_reaction_cap_reason_code"] is None
+    assert payload["reaction_intake_run_id"] is None
     assert payload["chat_intake_drained"] == 1
     assert payload["drain_skipped"] is False
     assert payload["drain_batch"] is not None
@@ -926,6 +932,53 @@ def test_sync_events_coalesce_zero_drains_ready_rows(
     assert payload["drain_batch"]["items_failed"] == 0
     conn = connect(db_path)
     assert count_raw_messages(conn) == 1
+
+
+def test_sync_events_reaction_cap_defers_and_sets_run_id(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lines = []
+    for i in range(3):
+        lines.append(
+            json.dumps(
+                {
+                    "header": {
+                        "event_type": "im.message.reaction.created_v1",
+                        "event_id": f"rx-cli-cap-{i}",
+                    },
+                    "event": {
+                        "message_id": f"om_cli_cap_{i}",
+                        "reaction_type": {"emoji_type": "THUMBSUP"},
+                        "operator_type": "user",
+                        "user_id": {"open_id": "ou_x"},
+                        "action_time": "1",
+                    },
+                }
+            )
+        )
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n".join(lines) + "\n"))
+    db_path = tmp_path / "evt_cap.db"
+    exit_code = run(
+        [
+            "sync-events",
+            "--db",
+            str(db_path),
+            "--source-id",
+            "dm:ou_demo",
+            "--max-reactions-per-run",
+            "2",
+            "--json",
+        ]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["json_objects"] == 3
+    assert payload["reaction_rows_inserted"] == 2
+    assert payload["reaction_cap_deferred"] == 1
+    assert payload["last_reaction_cap_reason_code"] == "reaction_cap_per_run_exceeded"
+    assert payload["reaction_intake_run_id"] is not None
 
 
 def test_backfill_json_runs_worker_service(

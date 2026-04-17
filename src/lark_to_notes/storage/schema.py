@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -404,6 +404,32 @@ CREATE INDEX IF NOT EXISTS idx_message_reaction_chat_ingest_fp
     ON message_reaction_events (chat_ingest_fingerprint);
 """
 
+# ---------------------------------------------------------------------------
+# Version 11 — reaction intake cap deferrals (explicit backlog pointers)
+# ---------------------------------------------------------------------------
+#
+# Cursors reuse the same ``header.event_id`` + payload hash family as
+# quarantine logs so operators can correlate without a second cursor namespace.
+
+_V11_DDL = """
+CREATE TABLE IF NOT EXISTS reaction_intake_deferrals (
+    deferral_id          TEXT PRIMARY KEY,
+    run_id               TEXT NOT NULL,
+    source_id            TEXT NOT NULL,
+    cursor_event_id      TEXT NOT NULL DEFAULT '',
+    cursor_payload_hash  TEXT NOT NULL DEFAULT '',
+    reason_code          TEXT NOT NULL,
+    governance_version   TEXT NOT NULL DEFAULT '',
+    policy_version       TEXT NOT NULL DEFAULT '',
+    deferred_at          TEXT NOT NULL
+                             DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    payload_json         TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_reaction_intake_deferral_run_source
+    ON reaction_intake_deferrals (run_id, source_id);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
@@ -415,6 +441,7 @@ _MIGRATIONS: dict[int, str] = {
     8: _V8_DDL,
     9: _V9_DDL,
     10: _V10_DDL,
+    11: _V11_DDL,
 }
 
 

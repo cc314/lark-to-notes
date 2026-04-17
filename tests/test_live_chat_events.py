@@ -9,6 +9,8 @@ import pytest
 
 from lark_to_notes.intake.ledger import chat_ingest_key, get_chat_intake_item
 from lark_to_notes.intake.models import IntakePath
+from lark_to_notes.intake.reaction_caps import ReactionIntakeCaps, ReactionIntakeCapState
+from lark_to_notes.intake.reaction_deferrals import count_reaction_intake_deferrals
 from lark_to_notes.live.chat_events import (
     event_type_from_envelope,
     extract_im_message_from_envelope,
@@ -96,6 +98,8 @@ def test_ingest_chat_event_ndjson_lines_counts_and_skips_garbage() -> None:
     assert out.chat_envelopes_ingested == 1
     assert out.reaction_rows_inserted == 0
     assert out.reaction_validation_rejects == 0
+    assert out.reaction_cap_deferred == 0
+    assert out.last_reaction_cap_reason_code is None
 
 
 def test_ingest_chat_event_ndjson_lines_skips_invalid_reaction_envelope() -> None:
@@ -215,3 +219,111 @@ def test_iter_chat_event_envelopes_from_ndjson_yields_objects() -> None:
     lines = ["", json.dumps({"a": 1}), json.dumps({"b": 2})]
     out = list(iter_chat_event_envelopes_from_ndjson(lines))
     assert out == [{"a": 1}, {"b": 2}]
+
+
+def _reaction_envelope(*, event_id: str, message_id: str = "om_rx_cap") -> dict[str, object]:
+    return {
+        "header": {"event_type": "im.message.reaction.created_v1", "event_id": event_id},
+        "event": {
+            "message_id": message_id,
+            "reaction_type": {"emoji_type": "THUMBSUP"},
+            "operator_type": "user",
+            "user_id": {"open_id": "ou_x"},
+            "action_time": "1",
+        },
+    }
+
+
+def test_ingest_reaction_caps_active_requires_run_id() -> None:
+    conn = _conn()
+    caps = ReactionIntakeCaps(max_reaction_envelopes_per_run=1)
+    react = _reaction_envelope(event_id="rx-cap-run")
+    with pytest.raises(ValueError, match="reaction_intake_run_id"):
+        ingest_chat_event_ndjson_lines(
+            conn,
+            [json.dumps(react)],
+            source_id="dm:ou_demo",
+            worker_source_type="dm_user",
+            chat_type="p2p",
+            caps=caps,
+            cap_state=ReactionIntakeCapState(),
+            reaction_intake_run_id=None,
+        )
+
+
+def test_ingest_reaction_per_run_cap_defers_with_explicit_row() -> None:
+    conn = _conn()
+    caps = ReactionIntakeCaps(max_reaction_envelopes_per_run=2)
+    lines = [
+        json.dumps(_reaction_envelope(event_id="rx-a")),
+        json.dumps(_reaction_envelope(event_id="rx-b")),
+        json.dumps(_reaction_envelope(event_id="rx-c")),
+    ]
+    out = ingest_chat_event_ndjson_lines(
+        conn,
+        lines,
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+        caps=caps,
+        cap_state=ReactionIntakeCapState(),
+        reaction_intake_run_id="run-cap-test",
+    )
+    assert out.reaction_rows_inserted == 2
+    assert out.reaction_cap_deferred == 1
+    assert out.last_reaction_cap_reason_code == "reaction_cap_per_run_exceeded"
+    assert count_reaction_intake_deferrals(conn, run_id="run-cap-test") == 1
+
+
+def test_ingest_reaction_cap_replay_duplicate_does_not_consume_cap_slot() -> None:
+    conn = _conn()
+    caps = ReactionIntakeCaps(max_reaction_envelopes_per_run=2)
+    react = _reaction_envelope(event_id="rx-dup")
+    line = json.dumps(react)
+    out = ingest_chat_event_ndjson_lines(
+        conn,
+        [line, line],
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+        caps=caps,
+        cap_state=ReactionIntakeCapState(),
+        reaction_intake_run_id="run-dup",
+    )
+    assert out.reaction_rows_inserted == 1
+    assert out.reaction_cap_deferred == 0
+
+
+def test_ingest_reaction_cap_converges_when_limit_raised() -> None:
+    conn = _conn()
+    lines = [
+        json.dumps(_reaction_envelope(event_id="rx-c1")),
+        json.dumps(_reaction_envelope(event_id="rx-c2")),
+        json.dumps(_reaction_envelope(event_id="rx-c3")),
+    ]
+    out_tight = ingest_chat_event_ndjson_lines(
+        conn,
+        lines,
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+        caps=ReactionIntakeCaps(max_reaction_envelopes_per_run=2),
+        cap_state=ReactionIntakeCapState(),
+        reaction_intake_run_id="run-tight",
+    )
+    assert out_tight.reaction_rows_inserted == 2
+    assert out_tight.reaction_cap_deferred == 1
+    out_replay = ingest_chat_event_ndjson_lines(
+        conn,
+        lines,
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+        caps=ReactionIntakeCaps(max_reaction_envelopes_per_run=5),
+        cap_state=ReactionIntakeCapState(),
+        reaction_intake_run_id="run-wide",
+    )
+    assert out_replay.reaction_rows_inserted == 1
+    assert out_replay.reaction_cap_deferred == 0
+    total = conn.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()
+    assert int(total["c"]) == 3

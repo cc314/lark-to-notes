@@ -32,6 +32,20 @@ from lark_to_notes.intake.models import (
     IntakePath,
     RawMessage,
 )
+from lark_to_notes.intake.reaction_caps import (
+    REACTION_INTAKE_GOVERNANCE_VERSION,
+    ReactionIntakeCaps,
+    ReactionIntakeCapState,
+    reaction_cap_block_reason,
+)
+from lark_to_notes.intake.reaction_deferrals import (
+    count_reaction_intake_deferrals,
+    insert_reaction_intake_deferral,
+)
+from lark_to_notes.intake.reaction_effective import (
+    apply_reaction_step,
+    materialize_effective_counts,
+)
 from lark_to_notes.intake.reaction_model import (
     NormalizedReactionEvent,
     ReactionKind,
@@ -48,6 +62,7 @@ from lark_to_notes.intake.reaction_store import (
 )
 
 __all__ = [
+    "REACTION_INTAKE_GOVERNANCE_VERSION",
     "ChatEventAction",
     "ChatIntakeItem",
     "ChatIntakeState",
@@ -58,11 +73,15 @@ __all__ = [
     "NormalizedReactionEvent",
     "RawMessage",
     "ReactionInsertResult",
+    "ReactionIntakeCapState",
+    "ReactionIntakeCaps",
     "ReactionKind",
+    "apply_reaction_step",
     "canonical_reaction_event_id",
     "chat_ingest_key",
     "chat_intake_ledger_counts",
     "count_raw_messages",
+    "count_reaction_intake_deferrals",
     "document_ingest_key",
     "finish_intake_run",
     "get_chat_intake_item",
@@ -70,15 +89,18 @@ __all__ = [
     "get_raw_message",
     "insert_message_reaction_event",
     "insert_raw_message",
+    "insert_reaction_intake_deferral",
     "list_raw_messages",
     "list_raw_messages_recent",
     "list_ready_chat_intake",
     "list_ready_document_intake",
     "mark_chat_intake_processed",
     "mark_document_intake_processed",
+    "materialize_effective_counts",
     "observe_chat_message",
     "observe_document_surface",
     "parse_reaction_envelope",
+    "reaction_cap_block_reason",
     "reaction_correlation_counts",
     "reaction_event_id_from_envelope",
     "reaction_event_type",

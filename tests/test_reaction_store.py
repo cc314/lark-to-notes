@@ -171,7 +171,10 @@ def test_upstream_idempotency_ignores_volatile_payload_header(mem: sqlite3.Conne
         operator_user_id=base.operator_user_id,
         operator_union_id=base.operator_union_id,
         action_time=base.action_time,
-        payload={"header": {"event_id": "feishu-stable", "create_time": "999"}, "event": {"message_id": "om_1"}},
+        payload={
+            "header": {"event_id": "feishu-stable", "create_time": "999"},
+            "event": {"message_id": "om_1"},
+        },
     )
     assert insert_message_reaction_event(mem, base).inserted is True
     assert insert_message_reaction_event(mem, alt).inserted is False
