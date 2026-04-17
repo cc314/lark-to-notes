@@ -524,3 +524,94 @@ def test_verify_live_adapter_writes_artifact_jsonl(tmp_path: Path) -> None:
     steps_ok = {(str(e.get("step", "")), str(e.get("status", ""))) for e in parsed}
     assert ("doctor", "ok") in steps_ok
     assert ("sync_events", "ok") in steps_ok
+
+
+def test_subprocess_sync_events_stage_log_ndjson_mixed_receive_and_reaction(
+    tmp_path: Path,
+) -> None:
+    """``uv run lark-to-notes sync-events --stage-log-ndjson`` emits lw-pzj.10.6 records on stderr."""
+
+    repo_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "stage_integ.db"
+    receive = {
+        "header": {"event_type": "im.message.receive_v1", "event_id": "ev-msg-1"},
+        "event": {
+            "message": {
+                "message_id": "om_integ_mix",
+                "chat_id": "ou_chat",
+                "create_time": "1713096000000",
+                "body": {"content": json.dumps({"text": "mix stream"})},
+                "sender": {"id": "ou_sender", "name": "Alice"},
+            }
+        },
+    }
+    reaction = {
+        "header": {"event_type": "im.message.reaction.created_v1", "event_id": "rx-integ-1"},
+        "event": {
+            "message_id": "om_integ_mix",
+            "reaction_type": {"emoji_type": "THUMBSUP"},
+            "operator_type": "user",
+            "user_id": {"open_id": "ou_x"},
+            "action_time": "1",
+        },
+    }
+    stdin = json.dumps(receive) + "\n" + json.dumps(reaction) + "\n"
+    proc = subprocess.run(
+        [
+            "uv",
+            "run",
+            "lark-to-notes",
+            "sync-events",
+            "--db",
+            str(db_path),
+            "--source-id",
+            "dm:ou_integ",
+            "--no-drain",
+            "--json",
+            "--stage-log-ndjson",
+        ],
+        cwd=str(repo_root),
+        input=stdin,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    summary = json.loads(proc.stdout)
+    assert summary["json_objects"] == 2
+    assert summary["envelopes_ingested"] == 1
+    assert summary["reaction_rows_inserted"] == 1
+
+    stage_keys = {
+        "ts",
+        "stage",
+        "event_type",
+        "event_id",
+        "source_id",
+        "message_id",
+        "result",
+        "reason_code",
+        "duration_ms",
+        "run_id",
+    }
+    stage_records: list[dict[str, object]] = []
+    for raw in proc.stderr.splitlines():
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            continue
+        with contextlib.suppress(json.JSONDecodeError):
+            rec = json.loads(raw)
+            if isinstance(rec, dict) and "stage" in rec and "result" in rec:
+                stage_records.append(rec)
+
+    assert len(stage_records) == 2, stage_records
+    assert all(set(r.keys()) == stage_keys for r in stage_records)
+    assert stage_records[0]["stage"] == "chat_receive_v1"
+    assert stage_records[0]["result"] == "accepted"
+    assert stage_records[0]["message_id"] == "om_integ_mix"
+    assert stage_records[1]["stage"] == "reaction_insert"
+    assert stage_records[1]["result"] == "accepted"
+    assert stage_records[1]["message_id"] == "om_integ_mix"
+    run_ids = {str(r["run_id"]) for r in stage_records}
+    assert len(run_ids) == 1
+    assert str(run_ids.pop()).startswith("ndjson-")

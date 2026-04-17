@@ -466,6 +466,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit machine-readable JSON",
     )
     sync_events_parser.add_argument(
+        "--stage-log-ndjson",
+        action="store_true",
+        help=(
+            "Emit one JSON object per decoded stdin envelope to stderr "
+            "(lw-pzj.10.6: ts, stage, event_type, event_id, source_id, message_id, "
+            "result, reason_code, duration_ms, run_id)"
+        ),
+    )
+    sync_events_parser.add_argument(
         "--coalesce-window-seconds",
         type=int,
         default=60,
@@ -1680,6 +1689,13 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
     reaction_intake_run_id: str | None = None
     if caps.limits_active:
         reaction_intake_run_id = start_run(conn, "sync-events-ndjson").run_id
+    stage_log = None
+    if args.stage_log_ndjson:
+
+        def _stage_log_sink(record: dict[str, Any]) -> None:
+            print(json.dumps(record, ensure_ascii=False), file=sys.stderr, flush=True)
+
+        stage_log = _stage_log_sink
     try:
         outcome = ingest_chat_event_ndjson_lines(
             conn,
@@ -1692,6 +1708,7 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
             caps=caps,
             cap_state=cap_state,
             reaction_intake_run_id=reaction_intake_run_id,
+            stage_log=stage_log,
         )
     except BaseException:
         if reaction_intake_run_id:

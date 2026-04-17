@@ -11,6 +11,7 @@ from __future__ import annotations
 from lark_to_notes.live.chat_events import (
     ChatEventNdjsonIngestOutcome,
     bounded_envelope_excerpt,
+    emit_sync_event_stage_log,
     envelope_event_id,
     event_type_from_envelope,
     extract_im_message_from_envelope,
@@ -68,6 +69,7 @@ __all__ = [
     "LiveWorkerConfigSnapshot",
     "ReactionEnvelopeValidation",
     "bounded_envelope_excerpt",
+    "emit_sync_event_stage_log",
     "envelope_event_id",
     "event_type_from_envelope",
     "extract_im_message_from_envelope",

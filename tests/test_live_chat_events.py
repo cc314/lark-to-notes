@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from typing import Any
 
 import pytest
 
@@ -80,6 +81,80 @@ def test_ingest_receive_message_v1_wrong_event_type_is_skipped() -> None:
         chat_type="p2p",
     )
     assert item is None
+
+
+_STAGE_LOG_KEYS = frozenset(
+    {
+        "ts",
+        "stage",
+        "event_type",
+        "event_id",
+        "source_id",
+        "message_id",
+        "result",
+        "reason_code",
+        "duration_ms",
+        "run_id",
+    }
+)
+
+
+def test_ingest_chat_event_ndjson_lines_stage_log_contract_per_envelope() -> None:
+    conn = _conn()
+    lines = [
+        json.dumps(_receive_v1_envelope(message_id="om_a")),
+        json.dumps({"header": {"event_type": "im.message.receive_v1"}, "event": {}}),
+    ]
+    logs: list[dict[str, Any]] = []
+    out = ingest_chat_event_ndjson_lines(
+        conn,
+        lines,
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+        observed_at="2026-05-01T10:00:00Z",
+        stage_log=logs.append,
+    )
+    assert out.json_objects == 2
+    assert len(logs) == 2
+    run_ids = {ln["run_id"] for ln in logs}
+    assert len(run_ids) == 1
+    rid = run_ids.pop()
+    assert rid.startswith("ndjson-")
+    assert all(set(ln.keys()) == _STAGE_LOG_KEYS for ln in logs)
+    assert logs[0]["stage"] == "chat_receive_v1"
+    assert logs[0]["result"] == "accepted"
+    assert logs[0]["message_id"] == "om_a"
+    assert logs[0]["source_id"] == "dm:ou_demo"
+    assert logs[1]["stage"] == "ndjson_routing"
+    assert logs[1]["result"] == "idempotent_skip"
+    assert logs[1]["reason_code"] == "event_type_not_ingested"
+
+
+def test_ingest_chat_event_ndjson_lines_stage_log_uses_reaction_run_id_when_capped() -> None:
+    conn = _conn()
+    caps = ReactionIntakeCaps(max_reaction_envelopes_per_run=1)
+    lines = [
+        json.dumps(_reaction_envelope(event_id="rx-s1")),
+        json.dumps(_reaction_envelope(event_id="rx-s2")),
+    ]
+    logs: list[dict[str, Any]] = []
+    ingest_chat_event_ndjson_lines(
+        conn,
+        lines,
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+        caps=caps,
+        cap_state=ReactionIntakeCapState(),
+        reaction_intake_run_id="run-stage",
+        stage_log=logs.append,
+    )
+    assert len(logs) == 2
+    assert {ln["run_id"] for ln in logs} == {"run-stage"}
+    assert logs[0]["result"] == "accepted"
+    assert logs[1]["result"] == "deferred"
+    assert logs[1]["stage"] == "reaction_intake_cap"
 
 
 def test_ingest_chat_event_ndjson_lines_counts_and_skips_garbage() -> None:

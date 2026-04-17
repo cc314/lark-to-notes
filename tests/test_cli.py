@@ -890,6 +890,62 @@ def test_sync_events_stdin_ingests_receive_v1(
     assert payload["drain_batch"]["items_total"] == 0
 
 
+def test_sync_events_stage_log_ndjson_on_stderr(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    envelope = {
+        "header": {"event_type": "im.message.receive_v1"},
+        "event": {
+            "message": {
+                "message_id": "om_cli_stage",
+                "chat_id": "ou_chat",
+                "create_time": "1713096000000",
+                "body": {"content": json.dumps({"text": "stage log"})},
+                "sender": {"id": "ou_sender", "name": "Alice"},
+            }
+        },
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(envelope) + "\n"))
+    db_path = tmp_path / "evt.db"
+    exit_code = run(
+        [
+            "sync-events",
+            "--db",
+            str(db_path),
+            "--source-id",
+            "dm:ou_demo",
+            "--json",
+            "--stage-log-ndjson",
+        ]
+    )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["json_objects"] == 1
+    err_lines = [ln for ln in captured.err.splitlines() if ln.strip()]
+    assert len(err_lines) == 1
+    rec = json.loads(err_lines[0])
+    assert set(rec.keys()) == {
+        "ts",
+        "stage",
+        "event_type",
+        "event_id",
+        "source_id",
+        "message_id",
+        "result",
+        "reason_code",
+        "duration_ms",
+        "run_id",
+    }
+    assert rec["stage"] == "chat_receive_v1"
+    assert rec["result"] == "accepted"
+    assert rec["message_id"] == "om_cli_stage"
+    assert rec["source_id"] == "dm:ou_demo"
+    assert rec["run_id"].startswith("ndjson-")
+
+
 def test_sync_events_coalesce_zero_drains_ready_rows(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

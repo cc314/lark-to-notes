@@ -12,7 +12,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from lark_to_notes.intake.ledger import observe_chat_message
@@ -39,9 +42,46 @@ from lark_to_notes.live.reaction_envelopes import (
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
 logger = logging.getLogger(__name__)
+
+_SYNC_EVENT_STAGE_LOG_RESULTS = frozenset(
+    {"accepted", "quarantined", "deferred", "idempotent_skip"}
+)
+
+
+def emit_sync_event_stage_log(
+    sink: Callable[[dict[str, Any]], None],
+    *,
+    run_id: str,
+    stage: str,
+    event_type: str,
+    event_id: str | None,
+    source_id: str,
+    message_id: str | None,
+    result: str,
+    reason_code: str,
+    duration_ms: int,
+) -> None:
+    """Emit one structured record for ``sync-events`` / NDJSON integration (lw-pzj.10.6)."""
+
+    if result not in _SYNC_EVENT_STAGE_LOG_RESULTS:
+        raise ValueError(f"invalid stage log result: {result!r}")
+    sink(
+        {
+            "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            "stage": stage,
+            "event_type": event_type,
+            "event_id": event_id,
+            "source_id": source_id,
+            "message_id": message_id,
+            "result": result,
+            "reason_code": reason_code,
+            "duration_ms": int(duration_ms),
+            "run_id": run_id,
+        }
+    )
 
 _RECEIVE_MESSAGE_V1 = "im.message.receive_v1"
 _EXCERPT_MAX = 256
@@ -145,6 +185,18 @@ def extract_im_message_from_envelope(envelope: dict[str, Any]) -> dict[str, Any]
     return msg
 
 
+def _receive_v1_message_id_hint(envelope: dict[str, Any]) -> str | None:
+    """Best-effort ``message_id`` for ``im.message.receive_v1`` envelopes."""
+
+    if event_type_from_envelope(envelope) != _RECEIVE_MESSAGE_V1:
+        return None
+    msg = extract_im_message_from_envelope(envelope)
+    if msg is None:
+        return None
+    mid = str(msg.get("message_id") or "").strip()
+    return mid or None
+
+
 def iter_chat_event_envelopes_from_ndjson(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
     """Yield each non-empty line that decodes to a JSON object."""
 
@@ -216,6 +268,7 @@ def ingest_chat_event_ndjson_lines(
     caps: ReactionIntakeCaps | None = None,
     cap_state: ReactionIntakeCapState | None = None,
     reaction_intake_run_id: str | None = None,
+    stage_log: Callable[[dict[str, Any]], None] | None = None,
 ) -> ChatEventNdjsonIngestOutcome:
     """Ingest NDJSON lines for chat message events and IM reaction events.
 
@@ -227,6 +280,12 @@ def ingest_chat_event_ndjson_lines(
     ``im.message.receive_v1`` ledger path and the reaction insert path are caught,
     logged with ``reason_code`` / ``payload_hash`` / ``event_id``, and counted for
     operator surfaces (``lw-pzj.9.*`` / ``sync-events --json``).
+
+    When *stage_log* is set, each decoded envelope emits exactly one structured
+    record (``lw-pzj.10.6``): ``ts``, ``stage``, ``event_type``, ``event_id``,
+    ``source_id``, ``message_id``, ``result`` (``accepted`` / ``quarantined`` /
+    ``deferred`` / ``idempotent_skip``), ``reason_code``, ``duration_ms``,
+    ``run_id``.
 
     Returns :class:`ChatEventNdjsonIngestOutcome` with *json_objects* (decoded
     dict lines), *chat_envelopes_ingested* (``im.message.receive_v1`` ledger
@@ -261,8 +320,38 @@ def ingest_chat_event_ndjson_lines(
     last_rx_ph: str | None = None
     last_rx_rc: str | None = None
 
+    log_run_id = (reaction_intake_run_id or "").strip() or f"ndjson-{uuid.uuid4().hex[:12]}"
+
+    def _emit(
+        *,
+        stage: str,
+        event_type: str,
+        event_id: str | None,
+        message_id: str | None,
+        result: str,
+        reason_code: str,
+        start_ns: int,
+    ) -> None:
+        if stage_log is None:
+            return
+        duration_ms = max(0, int((time.perf_counter_ns() - start_ns) // 1_000_000))
+        emit_sync_event_stage_log(
+            stage_log,
+            run_id=log_run_id,
+            stage=stage,
+            event_type=event_type,
+            event_id=event_id,
+            source_id=source_id,
+            message_id=message_id,
+            result=result,
+            reason_code=reason_code,
+            duration_ms=duration_ms,
+        )
+
     for envelope in iter_chat_event_envelopes_from_ndjson(lines):
         objects += 1
+        t0 = time.perf_counter_ns()
+        eid0 = envelope_event_id(envelope) or None
         try:
             item = ingest_receive_message_v1_envelope(
                 conn,
@@ -292,15 +381,47 @@ def ingest_chat_event_ndjson_lines(
                     "payload_excerpt": bounded_envelope_excerpt(envelope),
                 },
             )
+            _emit(
+                stage="chat_receive_v1",
+                event_type=et,
+                event_id=eid or None,
+                message_id=_receive_v1_message_id_hint(envelope),
+                result="quarantined",
+                reason_code=rc,
+                start_ns=t0,
+            )
             continue
         if item is not None:
             ingested += 1
+            _emit(
+                stage="chat_receive_v1",
+                event_type=_RECEIVE_MESSAGE_V1,
+                event_id=eid0,
+                message_id=item.message_id,
+                result="accepted",
+                reason_code="chat_receive_v1_observed",
+                start_ns=t0,
+            )
             continue
         et = event_type_from_envelope(envelope)
         if not is_im_message_reaction_event_type(et):
+            _emit(
+                stage="ndjson_routing",
+                event_type=et,
+                event_id=eid0,
+                message_id=_receive_v1_message_id_hint(envelope),
+                result="idempotent_skip",
+                reason_code="event_type_not_ingested",
+                start_ns=t0,
+            )
             continue
         ph = payload_hash_for_chat_event(envelope)
         eid = envelope_event_id(envelope)
+        ev_payload = envelope.get("event")
+        rx_msg_hint: str | None = None
+        if isinstance(ev_payload, dict):
+            xm = str(ev_payload.get("message_id") or "").strip()
+            rx_msg_hint = xm or None
         check = validate_im_message_reaction_envelope(envelope)
         if not check.ok:
             rx_val_reject += 1
@@ -316,6 +437,15 @@ def ingest_chat_event_ndjson_lines(
                     "source_id": source_id,
                     "payload_excerpt": bounded_envelope_excerpt(envelope),
                 },
+            )
+            _emit(
+                stage="reaction_envelope_validate",
+                event_type=et,
+                event_id=eid or None,
+                message_id=rx_msg_hint,
+                result="quarantined",
+                reason_code=rc,
+                start_ns=t0,
             )
             continue
         rev = parse_reaction_envelope(envelope, source_id=source_id)
@@ -334,10 +464,28 @@ def ingest_chat_event_ndjson_lines(
                     "payload_excerpt": bounded_envelope_excerpt(envelope),
                 },
             )
+            _emit(
+                stage="reaction_parse",
+                event_type=et,
+                event_id=eid or None,
+                message_id=rx_msg_hint,
+                result="quarantined",
+                reason_code=rc,
+                start_ns=t0,
+            )
             continue
         rid = canonical_reaction_event_id(rev)
         if reaction_event_row_exists(conn, rid):
             rx_benign_dup += 1
+            _emit(
+                stage="reaction_dedupe",
+                event_type=et,
+                event_id=eid or None,
+                message_id=rev.message_id,
+                result="idempotent_skip",
+                reason_code="reaction_row_already_present",
+                start_ns=t0,
+            )
             continue
         cap_rc = reaction_cap_block_reason(eff_caps, eff_state, source_id=source_id)
         if cap_rc is not None:
@@ -374,6 +522,15 @@ def ingest_chat_event_ndjson_lines(
                     "payload_excerpt": bounded_envelope_excerpt(envelope),
                 },
             )
+            _emit(
+                stage="reaction_intake_cap",
+                event_type=et,
+                event_id=eid or None,
+                message_id=rev.message_id,
+                result="deferred",
+                reason_code=cap_rc,
+                start_ns=t0,
+            )
             continue
         reaction_cap_consume_slot(eff_state, source_id=source_id)
         try:
@@ -399,6 +556,15 @@ def ingest_chat_event_ndjson_lines(
                     "payload_excerpt": bounded_envelope_excerpt(envelope),
                 },
             )
+            _emit(
+                stage="reaction_insert",
+                event_type=et,
+                event_id=eid or None,
+                message_id=rev.message_id,
+                result="quarantined",
+                reason_code=rc,
+                start_ns=t0,
+            )
             continue
         if res.inserted:
             reactions_inserted += 1
@@ -406,8 +572,26 @@ def ingest_chat_event_ndjson_lines(
                 reactions_inserted_add += 1
             else:
                 reactions_inserted_remove += 1
+            _emit(
+                stage="reaction_insert",
+                event_type=et,
+                event_id=eid or None,
+                message_id=rev.message_id,
+                result="accepted",
+                reason_code="reaction_row_inserted",
+                start_ns=t0,
+            )
         else:
             reaction_cap_release_slot(eff_state, source_id=source_id)
+            _emit(
+                stage="reaction_insert",
+                event_type=et,
+                event_id=eid or None,
+                message_id=rev.message_id,
+                result="idempotent_skip",
+                reason_code="reaction_row_duplicate_replay",
+                start_ns=t0,
+            )
     rx_quarantined = rx_val_reject + rx_parse_none + rx_ins_exc
     return ChatEventNdjsonIngestOutcome(
         json_objects=objects,
