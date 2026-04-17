@@ -495,9 +495,80 @@ def _handle_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _reaction_pipeline_artifact_links(
+    *,
+    runtime_db_path: Path,
+    fixture_corpus_root: Path,
+) -> dict[str, Any]:
+    """Pointers from ``reaction_pipeline_health`` to SQLite and replay inputs (lw-pzj.9.2)."""
+
+    db_abs = str(runtime_db_path.expanduser().resolve())
+    fixture_abs = str(fixture_corpus_root.expanduser().resolve())
+    default_raw = (_default_vault_root() / "raw" / "lark-worker").expanduser().resolve()
+    raw_abs = str(default_raw)
+    return {
+        "sqlite": {"runtime_db_path": db_abs},
+        "replay_directories": {
+            "doctor_fixture_corpus_root": fixture_abs,
+            "default_vault_raw_lark_worker": raw_abs,
+        },
+        "quarantine": {
+            "dead_letters_table": "dead_letters",
+            "doctor_json_keys": (
+                "runtime_diagnostics.recent_dead_letters",
+                "runtime.dead_letter_count",
+            ),
+        },
+        "reaction_ledger_tables": (
+            "message_reaction_events",
+            "reaction_orphan_queue",
+            "reaction_intake_deferrals",
+            "reaction_reconcile_observations",
+        ),
+        "argv_templates": {
+            "doctor_json": [
+                "uv",
+                "run",
+                "lark-to-notes",
+                "doctor",
+                "--db",
+                db_abs,
+                "--json",
+            ],
+            "replay_fixture_corpus": [
+                "uv",
+                "run",
+                "lark-to-notes",
+                "replay",
+                "--db",
+                db_abs,
+                "--raw-dir",
+                fixture_abs,
+                "--json",
+            ],
+            "replay_default_raw_logs": [
+                "uv",
+                "run",
+                "lark-to-notes",
+                "replay",
+                "--db",
+                db_abs,
+                "--raw-dir",
+                raw_abs,
+                "--json",
+            ],
+        },
+    }
+
+
 def _handle_doctor(args: argparse.Namespace) -> int:
     from lark_to_notes.intake.ledger import chat_intake_ledger_counts
+    from lark_to_notes.intake.reaction_deferrals import (
+        classify_reaction_pipeline_doctor_status,
+        reaction_intake_deferral_metrics,
+    )
     from lark_to_notes.intake.reaction_store import (
+        latest_message_reaction_event_seen_at,
         reaction_attach_reconcile_latency_ms,
         reaction_correlation_counts,
         reaction_orphan_backlog_metrics,
@@ -545,6 +616,45 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     reaction_linked_row_count = rx["linked_to_raw_message"]
     rx_backlog = reaction_orphan_backlog_metrics(runtime_conn)
     rx_attach = reaction_attach_reconcile_latency_ms(runtime_conn)
+    defer_metrics = reaction_intake_deferral_metrics(runtime_conn)
+    last_rx_seen = latest_message_reaction_event_seen_at(runtime_conn)
+    reaction_pipeline_status = classify_reaction_pipeline_doctor_status(
+        dead_letter_count=runtime_health.dead_letter_count,
+        error_rate=float(runtime_health.error_rate),
+        deferral_row_count=int(defer_metrics["deferral_row_count"]),
+        orphan_queue_depth=int(rx_backlog["queue_depth"]),
+        correlation_orphan_rows=int(reaction_orphan_row_count),
+    )
+    reaction_artifact_links = _reaction_pipeline_artifact_links(
+        runtime_db_path=runtime_db_path,
+        fixture_corpus_root=corpus.root,
+    )
+    reaction_pipeline_health = {
+        "status": reaction_pipeline_status,
+        "counts": {
+            "reaction_events_ingested": reaction_event_row_count,
+            "reaction_events_quarantined": None,
+            "reactions_rendered_to_vault": None,
+            "reactions_distilled": None,
+        },
+        "timestamps": {
+            "last_reaction_event_first_seen_at": last_rx_seen,
+        },
+        "cap_and_deferral": defer_metrics,
+        "signals": {
+            "orphan_correlation_rows_not_linked_to_raw": reaction_orphan_row_count,
+            "orphan_queue_rows_waiting_on_parent_raw": int(rx_backlog["queue_depth"]),
+            "dead_letter_count_total_runtime": runtime_health.dead_letter_count,
+            "completed_run_error_rate": runtime_health.error_rate,
+        },
+        "artifact_links": reaction_artifact_links,
+        "notes": (
+            "Quarantined per-reaction, vault-rendered, and distilled counts are "
+            "reserved for later pipeline stages; deferrals and ingest timestamps "
+            "are populated from SQLite today (lw-pzj.9.1). Use ``artifact_links`` "
+            "for DB paths, replay roots, and argv templates (lw-pzj.9.2)."
+        ),
+    }
     payload = {
         "status": "ok" if replay_summary.total_records == corpus.record_count else "error",
         "schema_version": SCHEMA_VERSION,
@@ -577,6 +687,7 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "orphan_backlog": rx_backlog,
             "attach_reconcile_latency_ms": rx_attach,
         },
+        "reaction_pipeline_health": reaction_pipeline_health,
         "supervised_live": supervised_live,
     }
     if args.json:
@@ -624,6 +735,17 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             f"depth={rx_backlog['queue_depth']} "
             f"dwell_p50_s={rx_backlog['dwell_seconds_p50']} "
             f"attach_ms_p50={rx_attach['attach_reconcile_ms_p50']}"
+        )
+        print(
+            "reaction_pipeline_health: "
+            f"status={reaction_pipeline_status} "
+            f"deferrals={defer_metrics['deferral_row_count']}"
+        )
+        print(
+            "reaction_artifact_links: "
+            f"db={reaction_artifact_links['sqlite']['runtime_db_path']} "
+            f"fixture_raw={reaction_artifact_links['replay_directories']['doctor_fixture_corpus_root']} "
+            "(see `doctor --json` → reaction_pipeline_health.artifact_links)"
         )
         print(
             f"supervised_live: {supervised_live['model']} (see `doctor --json` key supervised_live)"

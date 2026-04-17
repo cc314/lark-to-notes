@@ -32,6 +32,15 @@ def count_reaction_orphan_queue(conn: sqlite3.Connection) -> int:
     return int(row["c"] if row is not None else 0)
 
 
+def latest_message_reaction_event_seen_at(conn: sqlite3.Connection) -> str | None:
+    """Latest ``first_seen_at`` across ``message_reaction_events`` (doctor / lw-pzj.9.1)."""
+
+    row = conn.execute("SELECT MAX(first_seen_at) AS m FROM message_reaction_events").fetchone()
+    if row is None or row["m"] is None:
+        return None
+    return str(row["m"])
+
+
 def _percentile_int(sorted_seconds: list[int], p: float) -> int | None:
     if not sorted_seconds:
         return None

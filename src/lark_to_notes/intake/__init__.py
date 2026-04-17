@@ -39,8 +39,11 @@ from lark_to_notes.intake.reaction_caps import (
     reaction_cap_block_reason,
 )
 from lark_to_notes.intake.reaction_deferrals import (
+    ReactionPipelineDoctorStatus,
+    classify_reaction_pipeline_doctor_status,
     count_reaction_intake_deferrals,
     insert_reaction_intake_deferral,
+    reaction_intake_deferral_metrics,
 )
 from lark_to_notes.intake.reaction_effective import (
     apply_reaction_step,
@@ -59,6 +62,7 @@ from lark_to_notes.intake.reaction_store import (
     canonical_reaction_event_id,
     count_reaction_orphan_queue,
     insert_message_reaction_event,
+    latest_message_reaction_event_seen_at,
     reaction_attach_reconcile_latency_ms,
     reaction_correlation_counts,
     reaction_orphan_backlog_metrics,
@@ -80,10 +84,12 @@ __all__ = [
     "ReactionIntakeCapState",
     "ReactionIntakeCaps",
     "ReactionKind",
+    "ReactionPipelineDoctorStatus",
     "apply_reaction_step",
     "canonical_reaction_event_id",
     "chat_ingest_key",
     "chat_intake_ledger_counts",
+    "classify_reaction_pipeline_doctor_status",
     "count_raw_messages",
     "count_reaction_intake_deferrals",
     "count_reaction_orphan_queue",
@@ -96,6 +102,7 @@ __all__ = [
     "insert_message_reaction_event",
     "insert_raw_message",
     "insert_reaction_intake_deferral",
+    "latest_message_reaction_event_seen_at",
     "list_raw_messages",
     "list_raw_messages_recent",
     "list_ready_chat_intake",
@@ -111,6 +118,7 @@ __all__ = [
     "reaction_correlation_counts",
     "reaction_event_id_from_envelope",
     "reaction_event_type",
+    "reaction_intake_deferral_metrics",
     "reaction_orphan_backlog_metrics",
     "start_intake_run",
     "surrogate_reaction_event_id",

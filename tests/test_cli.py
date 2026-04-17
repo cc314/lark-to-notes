@@ -1514,6 +1514,7 @@ def test_doctor_json_has_all_expected_keys(
         "runtime_diagnostics",
         "chat_intake_ledger",
         "message_reaction_events",
+        "reaction_pipeline_health",
         "supervised_live",
     ):
         assert key in payload, f"missing key: {key!r}"
@@ -1552,9 +1553,110 @@ def test_doctor_json_has_all_expected_keys(
         assert key in ob, f"missing orphan_backlog key: {key!r}"
     assert ob["queue_depth"] == 0
     ar = mrx["attach_reconcile_latency_ms"]
-    for key in ("attach_reconcile_sample_count", "attach_reconcile_ms_p50", "attach_reconcile_ms_p90"):
+    for key in (
+        "attach_reconcile_sample_count",
+        "attach_reconcile_ms_p50",
+        "attach_reconcile_ms_p90",
+    ):
         assert key in ar, f"missing attach_reconcile_latency_ms key: {key!r}"
     assert ar["attach_reconcile_sample_count"] == 0
+    rph = payload["reaction_pipeline_health"]
+    assert rph["status"] == "healthy"
+    assert rph["counts"]["reaction_events_ingested"] == 0
+    assert rph["counts"]["reaction_events_quarantined"] is None
+    assert rph["timestamps"]["last_reaction_event_first_seen_at"] is None
+    assert rph["cap_and_deferral"]["deferral_row_count"] == 0
+    assert rph["cap_and_deferral"]["by_reason_code"] == {}
+    assert "dead_letter_count_total_runtime" in rph["signals"]
+    al = rph["artifact_links"]
+    assert al["sqlite"]["runtime_db_path"] == str(db_path.resolve())
+    assert al["replay_directories"]["doctor_fixture_corpus_root"] == str(
+        FIXTURE_CORPUS_ROOT.resolve()
+    )
+    assert "default_vault_raw_lark_worker" in al["replay_directories"]
+    assert al["quarantine"]["dead_letters_table"] == "dead_letters"
+    assert "argv_templates" in al
+    assert "doctor_json" in al["argv_templates"]
+    assert "replay_fixture_corpus" in al["argv_templates"]
+
+
+def test_reaction_pipeline_doctor_status_precedence() -> None:
+    """Mutually exclusive triage enum obeys lw-pzj.9.1 precedence rules."""
+
+    from lark_to_notes.intake.reaction_deferrals import classify_reaction_pipeline_doctor_status
+
+    assert (
+        classify_reaction_pipeline_doctor_status(
+            dead_letter_count=0,
+            error_rate=0.0,
+            deferral_row_count=0,
+            orphan_queue_depth=0,
+            correlation_orphan_rows=0,
+            blocked_missing_scope=True,
+        )
+        == "blocked_missing_scope"
+    )
+    assert (
+        classify_reaction_pipeline_doctor_status(
+            dead_letter_count=0,
+            error_rate=0.0,
+            deferral_row_count=0,
+            orphan_queue_depth=0,
+            correlation_orphan_rows=0,
+            blocked_missing_api=True,
+        )
+        == "blocked_missing_api"
+    )
+    assert (
+        classify_reaction_pipeline_doctor_status(
+            dead_letter_count=1,
+            error_rate=0.0,
+            deferral_row_count=0,
+            orphan_queue_depth=0,
+            correlation_orphan_rows=0,
+        )
+        == "quarantine_elevated"
+    )
+    assert (
+        classify_reaction_pipeline_doctor_status(
+            dead_letter_count=0,
+            error_rate=0.3,
+            deferral_row_count=0,
+            orphan_queue_depth=0,
+            correlation_orphan_rows=0,
+        )
+        == "quarantine_elevated"
+    )
+    assert (
+        classify_reaction_pipeline_doctor_status(
+            dead_letter_count=0,
+            error_rate=0.0,
+            deferral_row_count=1,
+            orphan_queue_depth=0,
+            correlation_orphan_rows=0,
+        )
+        == "degraded_partial_history"
+    )
+    assert (
+        classify_reaction_pipeline_doctor_status(
+            dead_letter_count=0,
+            error_rate=0.0,
+            deferral_row_count=0,
+            orphan_queue_depth=1,
+            correlation_orphan_rows=0,
+        )
+        == "degraded_partial_history"
+    )
+    assert (
+        classify_reaction_pipeline_doctor_status(
+            dead_letter_count=0,
+            error_rate=0.0,
+            deferral_row_count=0,
+            orphan_queue_depth=0,
+            correlation_orphan_rows=1,
+        )
+        == "degraded_partial_history"
+    )
 
 
 def test_doctor_human_readable_output(
@@ -1582,4 +1684,5 @@ def test_doctor_human_readable_output(
     assert "chat_intake:" in out
     assert "reaction_events:" in out
     assert "reaction_orphan_queue:" in out
+    assert "reaction_artifact_links:" in out
     assert "supervised_live:" in out

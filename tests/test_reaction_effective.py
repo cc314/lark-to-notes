@@ -100,4 +100,6 @@ def test_exhaustive_chunked_replay_matches_materialize_small_grid() -> None:
             for kind, emoji, op in steps:
                 apply_reaction_step(c2, kind=kind, emoji_type=emoji, operator_key=op)
             assert dict(c2) == doubled
-            assert effective_reaction_set_fingerprint(dict(c2)) == effective_reaction_set_fingerprint(doubled)
+            assert effective_reaction_set_fingerprint(
+                dict(c2)
+            ) == effective_reaction_set_fingerprint(doubled)
