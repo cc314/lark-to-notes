@@ -18,6 +18,11 @@ from lark_to_notes.distill.reaction_rules import (
     get_reaction_ruleset,
     reaction_ruleset_versions,
 )
+from lark_to_notes.distill.reaction_signal import (
+    ReactionSignalEvidence,
+    build_reaction_signal_evidence,
+    reaction_signal_id,
+)
 from lark_to_notes.distill.routing import LLMProvider, classify_with_routing
 
 __all__ = [
@@ -29,11 +34,14 @@ __all__ = [
     "LLMProvider",
     "PromotionRec",
     "ReactionRuleset",
+    "ReactionSignalEvidence",
     "TaskClass",
     "UnknownReactionRulesetError",
+    "build_reaction_signal_evidence",
     "classify_with_routing",
     "default_classifier",
     "default_reaction_ruleset",
     "get_reaction_ruleset",
     "reaction_ruleset_versions",
+    "reaction_signal_id",
 ]

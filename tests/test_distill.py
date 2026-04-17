@@ -24,7 +24,16 @@ from lark_to_notes.distill.reaction_rules import (
     get_reaction_ruleset,
     reaction_ruleset_versions,
 )
+from lark_to_notes.distill.reaction_signal import (
+    build_reaction_signal_evidence,
+    reaction_signal_id,
+)
 from lark_to_notes.distill.routing import classify_with_routing
+from lark_to_notes.intake.reaction_effective import (
+    effective_reaction_set_fingerprint,
+    materialize_effective_counts,
+)
+from lark_to_notes.intake.reaction_model import ReactionKind
 from lark_to_notes.storage.db import init_db
 
 # ---------------------------------------------------------------------------
@@ -655,3 +664,62 @@ class TestReactionRulesetRegistry:
         assert v == tuple(sorted(v))
         assert "1" in v
         assert "2026-04-aggressive" in v
+
+
+# ---------------------------------------------------------------------------
+# Reaction signal evidence (lw-pzj.8.2)
+# ---------------------------------------------------------------------------
+
+
+class TestReactionSignalEvidence:
+    def test_reaction_signal_id_stable_for_quadruple(self) -> None:
+        counts = materialize_effective_counts(
+            [(ReactionKind.ADD, "THUMBSUP", "ou_alice")],
+        )
+        fp = effective_reaction_set_fingerprint(counts)
+        a = reaction_signal_id(
+            source_id="dm:ou_demo",
+            message_id="om_1",
+            ruleset_version="1",
+            effective_reaction_set_fingerprint=fp,
+        )
+        b = reaction_signal_id(
+            source_id="dm:ou_demo",
+            message_id="om_1",
+            ruleset_version="1",
+            effective_reaction_set_fingerprint=fp,
+        )
+        assert a == b
+        assert a.startswith("rxsig_")
+
+    def test_build_evidence_vault_projection_does_not_change_signal_id(self) -> None:
+        counts = materialize_effective_counts([(ReactionKind.ADD, "OK", "ou_b")])
+        fp = effective_reaction_set_fingerprint(counts)
+        e1 = build_reaction_signal_evidence(
+            source_id="dm:x",
+            message_id="om_y",
+            ruleset_version="1",
+            effective_reaction_set_fingerprint=fp,
+            vault_projection_fingerprint="",
+        )
+        e2 = build_reaction_signal_evidence(
+            source_id="dm:x",
+            message_id="om_y",
+            ruleset_version="1",
+            effective_reaction_set_fingerprint=fp,
+            vault_projection_fingerprint="proj_digest_9",
+        )
+        assert e1.signal_id == e2.signal_id
+        assert e2.vault_projection_fingerprint == "proj_digest_9"
+
+    def test_reason_codes_preserved(self) -> None:
+        counts: dict[tuple[str, str], int] = {}
+        fp = effective_reaction_set_fingerprint(counts)
+        e = build_reaction_signal_evidence(
+            source_id="dm:z",
+            message_id="om_z",
+            ruleset_version="1",
+            effective_reaction_set_fingerprint=fp,
+            reason_codes=("reaction_signal_test",),
+        )
+        assert e.reason_codes == ("reaction_signal_test",)
