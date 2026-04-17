@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 
 # Bump when cap semantics or defaults change (operator-facing governance hook).
 REACTION_INTAKE_GOVERNANCE_VERSION = "1"
+# Default policy stamp for new reaction intake rows (empty until operators pin policy).
+REACTION_INTAKE_POLICY_VERSION = ""
 
 
 @dataclass(frozen=True)
@@ -20,7 +22,7 @@ class ReactionIntakeCaps:
     max_reaction_envelopes_per_run: int = 0
     max_reaction_envelopes_per_source_per_run: int = 0
     governance_version: str = REACTION_INTAKE_GOVERNANCE_VERSION
-    policy_version: str = ""
+    policy_version: str = REACTION_INTAKE_POLICY_VERSION
 
     @property
     def limits_active(self) -> bool:

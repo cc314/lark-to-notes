@@ -34,6 +34,7 @@ from lark_to_notes.intake.models import (
 )
 from lark_to_notes.intake.reaction_caps import (
     REACTION_INTAKE_GOVERNANCE_VERSION,
+    REACTION_INTAKE_POLICY_VERSION,
     ReactionIntakeCaps,
     ReactionIntakeCapState,
     reaction_cap_block_reason,
@@ -72,6 +73,7 @@ from lark_to_notes.intake.reaction_store import (
 
 __all__ = [
     "REACTION_INTAKE_GOVERNANCE_VERSION",
+    "REACTION_INTAKE_POLICY_VERSION",
     "ChatEventAction",
     "ChatIntakeItem",
     "ChatIntakeState",

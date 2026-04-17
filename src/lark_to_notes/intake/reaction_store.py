@@ -187,7 +187,10 @@ def reaction_ledger_governance_sample_for_doctor(
     privacy-safe. Ordering is lexicographic for deterministic output.
     """
 
-    from lark_to_notes.intake.reaction_caps import REACTION_INTAKE_GOVERNANCE_VERSION
+    from lark_to_notes.intake.reaction_caps import (
+        REACTION_INTAKE_GOVERNANCE_VERSION,
+        REACTION_INTAKE_POLICY_VERSION,
+    )
 
     lim = max(1, min(int(limit), 50))
     rows = conn.execute(
@@ -209,7 +212,7 @@ def reaction_ledger_governance_sample_for_doctor(
         for r in rows
     ]
     builtin_gv = REACTION_INTAKE_GOVERNANCE_VERSION
-    builtin_pv = ""
+    builtin_pv = REACTION_INTAKE_POLICY_VERSION
     rows_with_explicit_gv = sum(
         int(t["row_count"]) for t in tuple_counts if str(t["governance_version"]) != ""
     )
