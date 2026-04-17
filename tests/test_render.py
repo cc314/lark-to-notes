@@ -673,6 +673,58 @@ class TestNoteWriterRenderRaw:
         assert result2.outcome == RenderOutcome.SKIPPED
 
 
+class TestNoteWriterMergeRawMachineBlock:
+    def test_merges_block_then_skips_identical(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        raw.mkdir(parents=True)
+        note = raw / "rx-host.md"
+        note.write_text("Operator paragraph.\n\n", encoding="utf-8")
+        bid = "ltn-rx-testmerge01"
+        inner = "### Summary\n\n- **k:** `v`\n"
+        writer = NoteWriter(vault_root=tmp_path)
+        r1 = writer.merge_raw_machine_block(
+            relative_path="raw/rx-host.md",
+            block_id=bid,
+            inner_markdown=inner,
+            entity_id="ent-1",
+        )
+        assert r1.outcome == RenderOutcome.UPDATED
+        text1 = note.read_text(encoding="utf-8")
+        assert "ltn:begin" in text1 and bid in text1
+        assert "Operator paragraph." in text1
+
+        r2 = writer.merge_raw_machine_block(
+            relative_path="raw/rx-host.md",
+            block_id=bid,
+            inner_markdown=inner,
+            entity_id="ent-1",
+        )
+        assert r2.outcome == RenderOutcome.SKIPPED
+
+    def test_fails_when_note_missing(self, tmp_path: Path) -> None:
+        (tmp_path / "raw").mkdir(parents=True)
+        writer = NoteWriter(vault_root=tmp_path)
+        r = writer.merge_raw_machine_block(
+            relative_path="raw/missing.md",
+            block_id="ltn-rx-x",
+            inner_markdown="x",
+        )
+        assert r.outcome == RenderOutcome.FAILED
+        assert r.error is not None
+
+    def test_rejects_path_escape(self, tmp_path: Path) -> None:
+        vault = tmp_path / "vault"
+        (vault / "raw").mkdir(parents=True)
+        writer = NoteWriter(vault_root=vault)
+        r = writer.merge_raw_machine_block(
+            relative_path="raw/../../escape.md",
+            block_id="ltn-rx-x",
+            inner_markdown="x",
+        )
+        assert r.outcome == RenderOutcome.FAILED
+        assert "invalid vault path" in (r.error or "")
+
+
 class TestNoteWriterRenderDaily:
     def test_writes_daily_note(self, tmp_path: Path) -> None:
         writer = NoteWriter(vault_root=tmp_path)
