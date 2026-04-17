@@ -13,7 +13,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from lark_to_notes.intake.ledger import chat_ingest_key
 from lark_to_notes.intake.reaction_model import NormalizedReactionEvent
@@ -30,6 +30,103 @@ def count_reaction_orphan_queue(conn: sqlite3.Connection) -> int:
 
     row = conn.execute("SELECT COUNT(*) AS c FROM reaction_orphan_queue").fetchone()
     return int(row["c"] if row is not None else 0)
+
+
+def _percentile_int(sorted_seconds: list[int], p: float) -> int | None:
+    if not sorted_seconds:
+        return None
+    idx = min(len(sorted_seconds) - 1, max(0, round((len(sorted_seconds) - 1) * p)))
+    return sorted_seconds[idx]
+
+
+def _percentile_float(sorted_vals: list[float], p: float) -> float | None:
+    if not sorted_vals:
+        return None
+    idx = min(len(sorted_vals) - 1, max(0, round((len(sorted_vals) - 1) * p)))
+    return sorted_vals[idx]
+
+
+def reaction_orphan_backlog_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Doctor-facing orphan-queue depth, age buckets, and dwell percentiles (lw-pzj.15.3).
+
+    ``dwell`` is wall time since ``first_queued_at`` for rows **still** in the
+    queue (stale-wait signal). Batch attach latency is summarized separately via
+    :func:`reaction_attach_reconcile_latency_ms` (``reaction_reconcile_observations``).
+    """
+
+    rows = conn.execute("SELECT first_queued_at FROM reaction_orphan_queue").fetchall()
+    depth = len(rows)
+    now = datetime.now(UTC)
+    buckets = {"lt_1m": 0, "1m_to_1h": 0, "1h_to_24h": 0, "gte_24h": 0}
+    ages: list[int] = []
+    oldest_at: str | None = None
+    oldest_age: int | None = None
+    parse_skips = 0
+    for r in rows:
+        raw = str(r["first_queued_at"])
+        try:
+            ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            parse_skips += 1
+            continue
+        age_sec = max(0, int((now - ts.astimezone(UTC)).total_seconds()))
+        ages.append(age_sec)
+        if oldest_age is None or age_sec > oldest_age:
+            oldest_age = age_sec
+            oldest_at = raw
+        if age_sec < 60:
+            buckets["lt_1m"] += 1
+        elif age_sec < 3600:
+            buckets["1m_to_1h"] += 1
+        elif age_sec < 86400:
+            buckets["1h_to_24h"] += 1
+        else:
+            buckets["gte_24h"] += 1
+    ages.sort()
+    return {
+        "queue_depth": depth,
+        "timestamp_parse_skips": parse_skips,
+        "oldest_first_queued_at": oldest_at,
+        "oldest_age_seconds": oldest_age,
+        "age_bucket_counts": buckets,
+        "dwell_seconds_p50": _percentile_int(ages, 0.50),
+        "dwell_seconds_p90": _percentile_int(ages, 0.90),
+    }
+
+
+def reaction_attach_reconcile_latency_ms(
+    conn: sqlite3.Connection, *, sample_limit: int = 200
+) -> dict[str, Any]:
+    """Percentiles of recent per-batch linkage ``elapsed_ms`` (lw-pzj.15.3).
+
+    Populated when :func:`insert_raw_message` attaches one or more orphan
+    reactions and records a row in ``reaction_reconcile_observations``.
+    """
+
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        ("reaction_reconcile_observations",),
+    ).fetchone()
+    if row is None:
+        return {
+            "attach_reconcile_sample_count": 0,
+            "attach_reconcile_ms_p50": None,
+            "attach_reconcile_ms_p90": None,
+        }
+    rows = conn.execute(
+        """
+        SELECT elapsed_ms FROM reaction_reconcile_observations
+        ORDER BY observation_id DESC
+        LIMIT ?
+        """,
+        (sample_limit,),
+    ).fetchall()
+    vals = sorted(float(r["elapsed_ms"]) for r in rows)
+    return {
+        "attach_reconcile_sample_count": len(vals),
+        "attach_reconcile_ms_p50": _percentile_float(vals, 0.50),
+        "attach_reconcile_ms_p90": _percentile_float(vals, 0.90),
+    }
 
 
 @dataclass(frozen=True)

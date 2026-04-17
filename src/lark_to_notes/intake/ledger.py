@@ -96,6 +96,23 @@ def _link_pending_reactions_for_raw_pair(
     still_pair = int(pair_row["c"] if pair_row is not None else 0)
     still_global = int(total_row["c"] if total_row is not None else 0)
     elapsed_s = time.perf_counter() - t0
+    if attached > 0:
+        conn.execute(
+            """
+            INSERT INTO reaction_reconcile_observations (
+                observed_at, orphan_batch_id, source_id, message_id,
+                attached_count, elapsed_ms
+            )
+            VALUES (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?, ?, ?, ?, ?)
+            """,
+            (
+                orphan_batch_id,
+                source_id,
+                message_id,
+                attached,
+                round(elapsed_s * 1000.0, 6),
+            ),
+        )
     logger.info(
         "reaction_orphan_reconciled",
         extra={

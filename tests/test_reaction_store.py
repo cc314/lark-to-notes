@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,9 @@ from lark_to_notes.intake.reaction_store import (
     canonical_reaction_event_id,
     count_reaction_orphan_queue,
     insert_message_reaction_event,
+    reaction_attach_reconcile_latency_ms,
     reaction_correlation_counts,
+    reaction_orphan_backlog_metrics,
     surrogate_reaction_event_id,
 )
 from lark_to_notes.storage.db import connect, init_db
@@ -250,14 +253,41 @@ def test_insert_raw_message_reconciliation_log_extra_fields(
     assert insert_raw_message(mem, msg) is True
     hits = [r for r in caplog.records if r.msg == "reaction_orphan_reconciled"]
     assert len(hits) == 1
-    rec = hits[0]
+    rec: Any = hits[0]
     assert len(getattr(rec, "orphan_batch_id", "")) == 32
-    assert rec.message_id == "om_1"
-    assert rec.source_id == "dm:test"
-    assert rec.attached_count == 1
-    assert rec.still_orphan == 0
-    assert rec.still_orphan_pair == 0
-    assert isinstance(rec.elapsed_ms, int | float)
+    assert getattr(rec, "message_id", None) == "om_1"
+    assert getattr(rec, "source_id", None) == "dm:test"
+    assert getattr(rec, "attached_count", None) == 1
+    assert getattr(rec, "still_orphan", None) == 0
+    assert getattr(rec, "still_orphan_pair", None) == 0
+    assert isinstance(getattr(rec, "elapsed_ms", None), int | float)
+
+
+def test_insert_raw_message_records_reconcile_observation(mem: sqlite3.Connection) -> None:
+    """Successful orphan attach persists one ``reaction_reconcile_observations`` row (lw-pzj.15.3)."""
+
+    insert_message_reaction_event(mem, _event(eid="ev-orph-obs"))
+    msg = RawMessage(
+        message_id="om_1",
+        source_id="dm:test",
+        source_type="dm_user",
+        chat_id="ou_c",
+        chat_type="p2p",
+        sender_id="ou_s",
+        sender_name="Bob",
+        direction="incoming",
+        created_at="2026-01-01T00:00:00Z",
+        content="hi",
+        payload={"content": "hi"},
+    )
+    assert insert_raw_message(mem, msg) is True
+    n = mem.execute("SELECT COUNT(*) AS c FROM reaction_reconcile_observations").fetchone()
+    assert int(n["c"]) == 1
+    lat = reaction_attach_reconcile_latency_ms(mem)
+    assert lat["attach_reconcile_sample_count"] == 1
+    assert lat["attach_reconcile_ms_p50"] is not None
+    bl = reaction_orphan_backlog_metrics(mem)
+    assert bl["queue_depth"] == 0
 
 
 def test_insert_raw_message_links_preexisting_orphan_reactions(mem: sqlite3.Connection) -> None:
@@ -360,3 +390,38 @@ def test_linked_reaction_never_queues_orphan(mem: sqlite3.Connection) -> None:
         ("ev-linked",),
     ).fetchone()
     assert int(row[0]) == 1
+
+
+def test_orphan_backlog_metrics_age_buckets(mem: sqlite3.Connection) -> None:
+    """Age histogram buckets reflect ``first_queued_at`` (lw-pzj.15.3)."""
+
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    rows_spec: list[tuple[str, str, str, str]] = [
+        ("q-b1", "dm:x", "m1", (now - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        ("q-b2", "dm:x", "m2", (now - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        ("q-b3", "dm:x", "m3", (now - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        ("q-b4", "dm:x", "m4", (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+    ]
+    for rid, src, mid, ts in rows_spec:
+        mem.execute(
+            """
+            INSERT INTO reaction_orphan_queue (
+                reaction_event_id, source_id, message_id, first_queued_at, last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (rid, src, mid, ts, ts),
+        )
+    mem.commit()
+    m = reaction_orphan_backlog_metrics(mem)
+    assert m["queue_depth"] == 4
+    assert m["timestamp_parse_skips"] == 0
+    bc = m["age_bucket_counts"]
+    assert bc["lt_1m"] == 1
+    assert bc["1m_to_1h"] == 1
+    assert bc["1h_to_24h"] == 1
+    assert bc["gte_24h"] == 1
+    assert m["dwell_seconds_p50"] is not None
+    assert m["dwell_seconds_p90"] is not None

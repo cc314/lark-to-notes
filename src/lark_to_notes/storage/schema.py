@@ -8,7 +8,7 @@ database is a no-op.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # ---------------------------------------------------------------------------
 # Version 1 — core watched-source governance tables
@@ -465,6 +465,29 @@ FROM message_reaction_events
 WHERE raw_message_present = 0;
 """
 
+# ---------------------------------------------------------------------------
+# Version 13 — reaction orphan reconcile observations (doctor / lw-pzj.15.3)
+# ---------------------------------------------------------------------------
+#
+# One row per successful attachment batch (``attached_count > 0``) from
+# :func:`lark_to_notes.intake.ledger.insert_raw_message` linkage path.
+
+_V13_DDL = """
+CREATE TABLE IF NOT EXISTS reaction_reconcile_observations (
+    observation_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at      TEXT NOT NULL
+                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    orphan_batch_id  TEXT NOT NULL,
+    source_id        TEXT NOT NULL,
+    message_id       TEXT NOT NULL,
+    attached_count   INTEGER NOT NULL,
+    elapsed_ms       REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reaction_reconcile_observed_at
+    ON reaction_reconcile_observations (observed_at);
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _V1_DDL,
     2: _V2_DDL,
@@ -478,6 +501,7 @@ _MIGRATIONS: dict[int, str] = {
     10: _V10_DDL,
     11: _V11_DDL,
     12: _V12_DDL,
+    13: _V13_DDL,
 }
 
 

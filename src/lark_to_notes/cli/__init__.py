@@ -497,7 +497,11 @@ def _handle_replay(args: argparse.Namespace) -> int:
 
 def _handle_doctor(args: argparse.Namespace) -> int:
     from lark_to_notes.intake.ledger import chat_intake_ledger_counts
-    from lark_to_notes.intake.reaction_store import reaction_correlation_counts
+    from lark_to_notes.intake.reaction_store import (
+        reaction_attach_reconcile_latency_ms,
+        reaction_correlation_counts,
+        reaction_orphan_backlog_metrics,
+    )
     from lark_to_notes.runtime.models import RunStatus
     from lark_to_notes.runtime.registry import health_report, list_dead_letters, list_runs
     from lark_to_notes.runtime.supervised import supervised_live_hints
@@ -539,6 +543,8 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     reaction_event_row_count = rx["total"]
     reaction_orphan_row_count = rx["orphan"]
     reaction_linked_row_count = rx["linked_to_raw_message"]
+    rx_backlog = reaction_orphan_backlog_metrics(runtime_conn)
+    rx_attach = reaction_attach_reconcile_latency_ms(runtime_conn)
     payload = {
         "status": "ok" if replay_summary.total_records == corpus.record_count else "error",
         "schema_version": SCHEMA_VERSION,
@@ -568,6 +574,8 @@ def _handle_doctor(args: argparse.Namespace) -> int:
             "row_count": reaction_event_row_count,
             "orphan_row_count": reaction_orphan_row_count,
             "linked_row_count": reaction_linked_row_count,
+            "orphan_backlog": rx_backlog,
+            "attach_reconcile_latency_ms": rx_attach,
         },
         "supervised_live": supervised_live,
     }
@@ -607,7 +615,15 @@ def _handle_doctor(args: argparse.Namespace) -> int:
         print(
             "reaction_events: "
             f"{reaction_event_row_count} row(s) "
-            f"({reaction_orphan_row_count} orphan, {reaction_linked_row_count} linked)"
+            f"({reaction_orphan_row_count} orphan, {reaction_linked_row_count} linked); "
+            f"orphan_queue_depth={rx_backlog['queue_depth']}, "
+            f"attach_reconcile_samples={rx_attach['attach_reconcile_sample_count']}"
+        )
+        print(
+            "reaction_orphan_queue: "
+            f"depth={rx_backlog['queue_depth']} "
+            f"dwell_p50_s={rx_backlog['dwell_seconds_p50']} "
+            f"attach_ms_p50={rx_attach['attach_reconcile_ms_p50']}"
         )
         print(
             f"supervised_live: {supervised_live['model']} (see `doctor --json` key supervised_live)"

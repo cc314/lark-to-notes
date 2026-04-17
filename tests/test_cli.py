@@ -1535,6 +1535,26 @@ def test_doctor_json_has_all_expected_keys(
     assert mrx["row_count"] == 0
     assert mrx["orphan_row_count"] == 0
     assert mrx["linked_row_count"] == 0
+    assert "orphan_backlog" in mrx
+    assert mrx["orphan_backlog"]["queue_depth"] == 0
+    assert "attach_reconcile_latency_ms" in mrx
+    assert mrx["attach_reconcile_latency_ms"]["attach_reconcile_sample_count"] == 0
+    ob = mrx["orphan_backlog"]
+    for key in (
+        "queue_depth",
+        "timestamp_parse_skips",
+        "oldest_first_queued_at",
+        "oldest_age_seconds",
+        "age_bucket_counts",
+        "dwell_seconds_p50",
+        "dwell_seconds_p90",
+    ):
+        assert key in ob, f"missing orphan_backlog key: {key!r}"
+    assert ob["queue_depth"] == 0
+    ar = mrx["attach_reconcile_latency_ms"]
+    for key in ("attach_reconcile_sample_count", "attach_reconcile_ms_p50", "attach_reconcile_ms_p90"):
+        assert key in ar, f"missing attach_reconcile_latency_ms key: {key!r}"
+    assert ar["attach_reconcile_sample_count"] == 0
 
 
 def test_doctor_human_readable_output(
@@ -1561,4 +1581,5 @@ def test_doctor_human_readable_output(
     assert "runtime:" in out
     assert "chat_intake:" in out
     assert "reaction_events:" in out
+    assert "reaction_orphan_queue:" in out
     assert "supervised_live:" in out
