@@ -44,6 +44,7 @@ from lark_to_notes.intake.reaction_deferrals import (
 )
 from lark_to_notes.intake.reaction_effective import (
     apply_reaction_step,
+    effective_reaction_set_fingerprint,
     materialize_effective_counts,
 )
 from lark_to_notes.intake.reaction_model import (
@@ -87,6 +88,7 @@ __all__ = [
     "count_reaction_intake_deferrals",
     "count_reaction_orphan_queue",
     "document_ingest_key",
+    "effective_reaction_set_fingerprint",
     "finish_intake_run",
     "get_chat_intake_item",
     "get_document_intake_item",

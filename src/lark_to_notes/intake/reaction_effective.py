@@ -7,6 +7,8 @@ Used by tests and future vault/distillation code. Each logical key is
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
 
 from lark_to_notes.intake.reaction_model import ReactionKind
@@ -44,3 +46,18 @@ def materialize_effective_counts(
     for kind, emoji, op in steps:
         apply_reaction_step(c, kind=kind, emoji_type=emoji, operator_key=op)
     return dict(c)
+
+
+def effective_reaction_set_fingerprint(counts: dict[ReactionKey, int]) -> str:
+    """Stable SHA-256 digest of the sorted effective reaction multiset.
+
+    Row order matches ``format_reaction_summary_markdown`` (same sort as the
+    vault table) for replay vs summary checks (lw-pzj.10.11).
+    """
+
+    items = [
+        {"emoji_type": emoji, "operator_key": op, "count": int(c)}
+        for (emoji, op), c in sorted(counts.items(), key=lambda x: (x[0][0], x[0][1]))
+    ]
+    payload = json.dumps(items, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
