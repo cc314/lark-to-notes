@@ -544,6 +544,15 @@ This subsection makes **IM reactions** normative context, not an optional aftert
 3. **Append-only history:** Store each reaction event as its own durable row. **Deletes are events**, not silent erasure of prior adds. **Current effective reactions** for UI, heuristics, and vault summaries are derived by **ordered replay** of add/remove for `(source_id, message_id)` or by maintaining a **deterministic materialized summary** updated from that log—either way, replay from SQLite must reproduce the same effective set.
 4. **Linkage:** Every reaction row links to **`message_id`** and **`source_id`** (watched chat source). When the parent message is not yet in `raw_messages`, the system must still accept reactions (backlog) and **attach or reconcile** after the message arrives, without minting a second canonical identity for the message.
 5. **Polling and historical backfill:** Event streams alone miss pre-subscription history. The system shall implement **reaction backfill** using **`lark-cli` or REST** list-reactions (or message-get payloads that include reactions) when those calls exist and are permitted, subject to **per-run and per-source caps** with explicit deferral. When no API path exists for a tenant, **doctor** and operator docs must report a **capability blocker** rather than implying silent completeness.
+
+#### Authoritative REST: list reactions per message (`lw-pzj.6.1`)
+
+For **historical snapshots keyed by an existing `message_id`**, Feishu/Lark documents **`GET /open-apis/im/v1/messages/:message_id/reactions`** (**List message reactions**, IM v1). Maintainer-facing entry points: [List message reactions (Feishu)](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/list) and [List message reactions (Lark)](https://open.larkoffice.com/document/server-docs/im-v1/message-reaction/list).
+
+**Operator facts:** responses use **`page_token` / `page_size`** pagination; callers need **`im:message.reactions:read`** (or an equivalent tenant bundle); the bot or user represented by the token must be **allowed in the chat** that owns the message; **withdrawn** messages cannot be queried for reactions.
+
+**Degraded mode (explicit):** there is **no** documented tenant-wide “export all reactions” API independent of message IDs. Backfill therefore **walks known `message_id` values** from locally captured chat history (`raw_messages`, chat ledger, or message-list APIs), then calls list-reactions per message under caps—**never** treat an empty table as proof that no reactions ever existed without checking this capability boundary.
+
 6. **Distillation and heuristics:** Versioned rules may consume **reaction aggregates** (counts, recency, configured emoji sets, streaks across thread) as **inputs** to `confidence_band`, `reason_code`, `promotion_rec`, or `needs_review` routing. Reactions must **not** override explicit dismissals or manual overrides. Any rule that can create a **task without message text** must be **opt-in in configuration**, default off, and audited in `policy_version`.
 7. **Vault raw projection:** Each chat message with a stable **`source_item_key` / `message_id`** must expose reactions in **`raw/`** under the same **raw-first** and **machine-owned block** rules as other chat artifacts: stable block IDs, idempotent rerender, backlinks to Lark where available, and **no duplicate path** per message for reaction-only updates.
 8. **Reconcile:** Reaction **vault drift** (missing section, stale summary vs event log) is repaired from SQLite **without re-fetching** when local data suffices; when upstream reconciliation is required, use the same repair staging and diagnostics as other chat surfaces.
@@ -551,7 +560,7 @@ This subsection makes **IM reactions** normative context, not an optional aftert
 
 #### Traceability matrix: reaction ingestion (plan ↔ code ↔ tests)
 
-Maintainer map for **Message reaction ingestion** bullets above. **TBD** marks work tracked under beads `lw-pzj.*` but not yet merged. Current chat **event** plumbing only handles `im.message.receive_v1` (see “Canonical event types”); reaction envelopes share the same *class* of operator pipe (`lark-cli event +subscribe` → stdin) but are **not** parsed yet.
+Maintainer map for **Message reaction ingestion** bullets above. **TBD** still marks *deferred* work (notably **backfill batching** `lw-pzj.6.*` and **replay/reconcile** `lw-pzj.13.*`) even where event ingest, SQLite, caps, vault projection, and distill overlays already landed in-tree.
 
 | Plan obligation (subsection bullets) | Primary implementation anchor (today) | Acceptance / bead owner |
 | --- | --- | --- |
