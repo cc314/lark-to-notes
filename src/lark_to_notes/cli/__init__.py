@@ -1475,6 +1475,7 @@ def _handle_sync_events(args: argparse.Namespace) -> int:
         "reaction_validation_rejects": outcome.reaction_validation_rejects,
         "reaction_insert_exceptions": outcome.reaction_insert_exceptions,
         "reaction_parse_none_after_validate": outcome.reaction_parse_none_after_validate,
+        "reaction_benign_duplicate_replays": outcome.reaction_benign_duplicate_replays,
         "reaction_cap_deferred": outcome.reaction_cap_deferred,
         "last_reaction_cap_reason_code": outcome.last_reaction_cap_reason_code,
         "reaction_intake_run_id": reaction_intake_run_id,

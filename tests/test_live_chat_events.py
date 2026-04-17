@@ -104,6 +104,7 @@ def test_ingest_chat_event_ndjson_lines_counts_and_skips_garbage() -> None:
     assert out.reaction_validation_rejects == 0
     assert out.reaction_cap_deferred == 0
     assert out.last_reaction_cap_reason_code is None
+    assert out.reaction_benign_duplicate_replays == 0
 
 
 def test_ingest_chat_event_ndjson_lines_skips_invalid_reaction_envelope() -> None:
@@ -153,6 +154,7 @@ def test_ingest_chat_event_ndjson_lines_inserts_reaction_event() -> None:
     assert out.chat_envelopes_ingested == 0
     assert out.reaction_rows_inserted == 1
     assert out.reaction_validation_rejects == 0
+    assert out.reaction_benign_duplicate_replays == 0
     row = conn.execute(
         "SELECT message_id, reaction_kind, governance_version FROM message_reaction_events "
         "WHERE reaction_event_id = ?",
@@ -298,6 +300,7 @@ def test_ingest_reaction_cap_replay_duplicate_does_not_consume_cap_slot() -> Non
     )
     assert out.reaction_rows_inserted == 1
     assert out.reaction_cap_deferred == 0
+    assert out.reaction_benign_duplicate_replays == 1
 
 
 def test_ingest_reaction_cap_converges_when_limit_raised() -> None:
@@ -331,5 +334,105 @@ def test_ingest_reaction_cap_converges_when_limit_raised() -> None:
     )
     assert out_replay.reaction_rows_inserted == 1
     assert out_replay.reaction_cap_deferred == 0
+    assert out_replay.reaction_benign_duplicate_replays == 2
     total = conn.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()
     assert int(total["c"]) == 3
+
+
+def test_ingest_reaction_cap_retry_storm_many_duplicates_respects_tight_cap() -> None:
+    """Under per-run cap=1, many identical replays must not defer after the first insert."""
+
+    conn = _conn()
+    caps = ReactionIntakeCaps(max_reaction_envelopes_per_run=1)
+    react = _reaction_envelope(event_id="rx-storm-dup")
+    line = json.dumps(react)
+    lines = [line] * 50
+    out = ingest_chat_event_ndjson_lines(
+        conn,
+        lines,
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+        caps=caps,
+        cap_state=ReactionIntakeCapState(),
+        reaction_intake_run_id="run-storm-dup",
+    )
+    assert out.reaction_rows_inserted == 1
+    assert out.reaction_cap_deferred == 0
+    assert out.reaction_benign_duplicate_replays == 49
+    total = conn.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()
+    assert int(total["c"]) == 1
+
+
+def test_ingest_reaction_cap_repeated_batch_no_row_growth_beyond_policy() -> None:
+    """Replaying the same capped NDJSON converges: total rows never exceed unique reactions."""
+
+    conn = _conn()
+    caps = ReactionIntakeCaps(max_reaction_envelopes_per_run=2)
+    lines = [
+        json.dumps(_reaction_envelope(event_id="rx-rp-a")),
+        json.dumps(_reaction_envelope(event_id="rx-rp-b")),
+        json.dumps(_reaction_envelope(event_id="rx-rp-c")),
+    ]
+    for i in range(10):
+        out = ingest_chat_event_ndjson_lines(
+            conn,
+            lines,
+            source_id="dm:ou_demo",
+            worker_source_type="dm_user",
+            chat_type="p2p",
+            caps=caps,
+            cap_state=ReactionIntakeCapState(),
+            reaction_intake_run_id=f"run-repeat-{i}",
+        )
+        if i == 0:
+            assert out.reaction_rows_inserted == 2
+            assert out.reaction_cap_deferred == 1
+            assert out.reaction_benign_duplicate_replays == 0
+        elif i == 1:
+            assert out.reaction_rows_inserted == 1
+            assert out.reaction_cap_deferred == 0
+            assert out.reaction_benign_duplicate_replays == 2
+        else:
+            assert out.reaction_rows_inserted == 0
+            assert out.reaction_cap_deferred == 0
+            assert out.reaction_benign_duplicate_replays == 3
+    total = conn.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()
+    assert int(total["c"]) == 3
+
+
+def test_ingest_reaction_cap_unique_stream_each_pass_respects_per_run_cap() -> None:
+    """A large unique batch is split by the cap; a replay cannot insert more than cap in one pass."""
+
+    conn = _conn()
+    cap_n = 5
+    caps = ReactionIntakeCaps(max_reaction_envelopes_per_run=cap_n)
+    lines = [json.dumps(_reaction_envelope(event_id=f"rx-uniq-{i}")) for i in range(20)]
+    out1 = ingest_chat_event_ndjson_lines(
+        conn,
+        lines,
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+        caps=caps,
+        cap_state=ReactionIntakeCapState(),
+        reaction_intake_run_id="run-uniq-1",
+    )
+    assert out1.reaction_rows_inserted == cap_n
+    assert out1.reaction_cap_deferred == 20 - cap_n
+    assert out1.reaction_benign_duplicate_replays == 0
+    out2 = ingest_chat_event_ndjson_lines(
+        conn,
+        lines,
+        source_id="dm:ou_demo",
+        worker_source_type="dm_user",
+        chat_type="p2p",
+        caps=caps,
+        cap_state=ReactionIntakeCapState(),
+        reaction_intake_run_id="run-uniq-2",
+    )
+    assert out2.reaction_rows_inserted == cap_n
+    assert out2.reaction_cap_deferred == 10
+    assert out2.reaction_benign_duplicate_replays == cap_n
+    total = conn.execute("SELECT COUNT(*) AS c FROM message_reaction_events").fetchone()
+    assert int(total["c"]) == 2 * cap_n

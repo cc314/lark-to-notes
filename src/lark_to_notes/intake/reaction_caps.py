@@ -1,7 +1,8 @@
 """Per-run / per-source caps for IM reaction event intake (lw-pzj.12.1).
 
-Caps are evaluated after structural validation and **before** parse/insert so
-operators can bound SQLite write volume without silently truncating streams.
+Caps gate **new** reaction rows after structural validation and parse.
+Envelopes whose canonical ``reaction_event_id`` already exists skip the cap
+(benign replays; lw-pzj.12.4); remaining inserts are bounded per run / per source.
 """
 
 from __future__ import annotations

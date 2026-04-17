@@ -92,6 +92,16 @@ def canonical_reaction_event_id(event: NormalizedReactionEvent) -> str:
     return head if head else surrogate_reaction_event_id(event)
 
 
+def reaction_event_row_exists(conn: sqlite3.Connection, reaction_event_id: str) -> bool:
+    """Return True when ``message_reaction_events`` already holds this primary key."""
+
+    row = conn.execute(
+        "SELECT 1 FROM message_reaction_events WHERE reaction_event_id = ? LIMIT 1",
+        (reaction_event_id,),
+    ).fetchone()
+    return row is not None
+
+
 def insert_message_reaction_event(
     conn: sqlite3.Connection,
     event: NormalizedReactionEvent,

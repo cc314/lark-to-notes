@@ -26,7 +26,11 @@ from lark_to_notes.intake.reaction_caps import (
 )
 from lark_to_notes.intake.reaction_deferrals import insert_reaction_intake_deferral
 from lark_to_notes.intake.reaction_model import parse_reaction_envelope
-from lark_to_notes.intake.reaction_store import insert_message_reaction_event
+from lark_to_notes.intake.reaction_store import (
+    canonical_reaction_event_id,
+    insert_message_reaction_event,
+    reaction_event_row_exists,
+)
 from lark_to_notes.live.chat_live import raw_message_from_lark_im_api
 from lark_to_notes.live.reaction_envelopes import (
     is_im_message_reaction_event_type,
@@ -55,6 +59,9 @@ class ChatEventNdjsonIngestOutcome:
     ``reaction_cap_deferred`` counts validated reaction envelopes skipped because
     intake caps were already exhausted; ``last_reaction_cap_reason_code`` mirrors
     quarantine-style operator hints.
+
+    ``reaction_benign_duplicate_replays`` counts parsed reactions whose canonical
+    ``reaction_event_id`` was already stored (retry storm; no cap slot, no insert).
     """
 
     json_objects: int
@@ -64,6 +71,7 @@ class ChatEventNdjsonIngestOutcome:
     reaction_validation_rejects: int
     reaction_insert_exceptions: int
     reaction_parse_none_after_validate: int
+    reaction_benign_duplicate_replays: int
     reaction_cap_deferred: int
     last_reaction_cap_reason_code: str | None
     last_chat_quarantine_event_id: str | None
@@ -216,8 +224,8 @@ def ingest_chat_event_ndjson_lines(
     Returns :class:`ChatEventNdjsonIngestOutcome` with *json_objects* (decoded
     dict lines), *chat_envelopes_ingested* (``im.message.receive_v1`` ledger
     observations), *reaction_rows_inserted* (new ``message_reaction_events``
-    rows from ``INSERT OR IGNORE``), plus quarantine counters and last-seen
-    fingerprints (bounded memory).
+    rows), *reaction_benign_duplicate_replays* (canonical id already present),
+    plus quarantine counters and last-seen fingerprints (bounded memory).
     """
     eff_caps = caps or ReactionIntakeCaps()
     eff_state = cap_state or ReactionIntakeCapState()
@@ -232,6 +240,7 @@ def ingest_chat_event_ndjson_lines(
     rx_val_reject = 0
     rx_ins_exc = 0
     rx_parse_none = 0
+    rx_benign_dup = 0
     rx_cap_deferred = 0
     last_cap_rc: str | None = None
     last_chat_eid: str | None = None
@@ -298,6 +307,27 @@ def ingest_chat_event_ndjson_lines(
                 },
             )
             continue
+        rev = parse_reaction_envelope(envelope, source_id=source_id)
+        if rev is None:
+            rx_parse_none += 1
+            rc = "reaction_parse_none_after_validate"
+            last_rx_eid, last_rx_ph, last_rx_rc = eid or None, ph, rc
+            logger.warning(
+                "reaction_pipeline_quarantined",
+                extra={
+                    "reason_code": rc,
+                    "payload_hash": ph,
+                    "event_id": eid,
+                    "event_type": et,
+                    "source_id": source_id,
+                    "payload_excerpt": bounded_envelope_excerpt(envelope),
+                },
+            )
+            continue
+        rid = canonical_reaction_event_id(rev)
+        if reaction_event_row_exists(conn, rid):
+            rx_benign_dup += 1
+            continue
         cap_rc = reaction_cap_block_reason(eff_caps, eff_state, source_id=source_id)
         if cap_rc is not None:
             rx_cap_deferred += 1
@@ -336,24 +366,6 @@ def ingest_chat_event_ndjson_lines(
             continue
         reaction_cap_consume_slot(eff_state, source_id=source_id)
         try:
-            rev = parse_reaction_envelope(envelope, source_id=source_id)
-            if rev is None:
-                reaction_cap_release_slot(eff_state, source_id=source_id)
-                rx_parse_none += 1
-                rc = "reaction_parse_none_after_validate"
-                last_rx_eid, last_rx_ph, last_rx_rc = eid or None, ph, rc
-                logger.warning(
-                    "reaction_pipeline_quarantined",
-                    extra={
-                        "reason_code": rc,
-                        "payload_hash": ph,
-                        "event_id": eid,
-                        "event_type": et,
-                        "source_id": source_id,
-                        "payload_excerpt": bounded_envelope_excerpt(envelope),
-                    },
-                )
-                continue
             res = insert_message_reaction_event(
                 conn,
                 rev,
@@ -389,6 +401,7 @@ def ingest_chat_event_ndjson_lines(
         reaction_validation_rejects=rx_val_reject,
         reaction_insert_exceptions=rx_ins_exc,
         reaction_parse_none_after_validate=rx_parse_none,
+        reaction_benign_duplicate_replays=rx_benign_dup,
         reaction_cap_deferred=rx_cap_deferred,
         last_reaction_cap_reason_code=last_cap_rc,
         last_chat_quarantine_event_id=last_chat_eid,

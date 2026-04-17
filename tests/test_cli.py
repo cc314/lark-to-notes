@@ -874,6 +874,7 @@ def test_sync_events_stdin_ingests_receive_v1(
     assert payload["reaction_validation_rejects"] == 0
     assert payload["reaction_insert_exceptions"] == 0
     assert payload["reaction_parse_none_after_validate"] == 0
+    assert payload["reaction_benign_duplicate_replays"] == 0
     assert payload["reaction_cap_deferred"] == 0
     assert payload["last_reaction_cap_reason_code"] is None
     assert payload["reaction_intake_run_id"] is None
@@ -976,6 +977,7 @@ def test_sync_events_reaction_cap_defers_and_sets_run_id(
     payload = json.loads(capsys.readouterr().out)
     assert payload["json_objects"] == 3
     assert payload["reaction_rows_inserted"] == 2
+    assert payload["reaction_benign_duplicate_replays"] == 0
     assert payload["reaction_cap_deferred"] == 1
     assert payload["last_reaction_cap_reason_code"] == "reaction_cap_per_run_exceeded"
     assert payload["reaction_intake_run_id"] is not None
