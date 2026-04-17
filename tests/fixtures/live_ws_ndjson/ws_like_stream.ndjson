@@ -1,0 +1,2 @@
+{"header":{"event_type":"im.message.receive_v1","event_id":"evt-ws-msg-1"},"event":{"message":{"message_id":"om_ws_drain_1","chat_id":"ou_chat_ws","create_time":"1713096000000","body":{"content":"{\"text\":\"fixture ws stream\"}"},"sender":{"id":"ou_sender_ws","name":"Fixture"}}}}
+{"header":{"event_type":"im.message.reaction.created_v1","event_id":"evt-ws-rx-1"},"event":{"message_id":"om_ws_drain_1","reaction_type":{"emoji_type":"THUMBSUP"},"operator_type":"user","user_id":{"open_id":"ou_reactor_ws"},"action_time":"1713096001000"}}
