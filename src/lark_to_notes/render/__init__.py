@@ -32,6 +32,11 @@ from lark_to_notes.render.reaction_vault import (
     reaction_primary_heading,
     reaction_vault_projection_fingerprint,
 )
+from lark_to_notes.render.reaction_vault_reconcile import (
+    analyze_reaction_vault_block,
+    repair_vault_note_reaction_blocks,
+    scan_vault_note_reaction_drift,
+)
 from lark_to_notes.render.writer import NoteWriter
 
 __all__ = [
@@ -43,6 +48,7 @@ __all__ = [
     "RenderResult",
     "RenderSurface",
     "RenderTarget",
+    "analyze_reaction_vault_block",
     "extract_block",
     "format_reaction_summary_markdown",
     "list_block_ids",
@@ -56,6 +62,8 @@ __all__ = [
     "render_current_tasks_item",
     "render_daily_note",
     "render_raw_note",
+    "repair_vault_note_reaction_blocks",
     "replace_block",
+    "scan_vault_note_reaction_drift",
     "wrap_block",
 ]

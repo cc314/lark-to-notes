@@ -6,6 +6,8 @@ import json
 import sqlite3
 from typing import Any
 
+import pytest
+
 from lark_to_notes.config.sources import ReactionBackfillCheckpoint, SourceType, WatchedSource
 from lark_to_notes.intake.reaction_backfill import (
     count_raw_messages_after_watermark,
@@ -48,6 +50,7 @@ def _insert_raw(
     message_id: str,
     source_id: str = "dm:ou_demo",
     created_at: str,
+    chat_id: str = "oc_x",
 ) -> None:
     conn.execute(
         """
@@ -55,9 +58,9 @@ def _insert_raw(
             message_id, source_id, source_type, chat_id, chat_type,
             sender_id, sender_name, direction, created_at, content, payload_json
         )
-        VALUES (?, ?, 'dm_user', 'oc_x', 'p2p', 'u1', 'A', 'incoming', ?, 'x', '{}')
+        VALUES (?, ?, 'dm_user', ?, 'p2p', 'u1', 'A', 'incoming', ?, 'x', '{}')
         """,
-        (message_id, source_id, created_at),
+        (message_id, source_id, chat_id, created_at),
     )
     conn.commit()
 
@@ -319,3 +322,127 @@ def test_make_lark_cli_reactions_list_fetcher_builds_argv() -> None:
     params = json.loads(captured["argv"][captured["argv"].index("--params") + 1])
     assert params["message_id"] == "om_cli"
     assert params["page_size"] == 12
+
+
+def test_execute_reaction_backfill_requires_fetch_when_not_dry() -> None:
+    conn = _conn()
+    with pytest.raises(ValueError, match="fetch_page"):
+        execute_reaction_backfill(conn, source_id="dm:ou_demo", fetch_page=None, dry_run=False)
+
+
+def test_dry_run_previews_messages_without_checkpoint_writes() -> None:
+    conn = _conn()
+    _seed_source(conn)
+    _insert_raw(conn, message_id="m1", created_at="2026-02-01T10:00:00Z")
+    _insert_raw(conn, message_id="m2", created_at="2026-03-01T10:00:00Z")
+    out = execute_reaction_backfill(
+        conn,
+        source_id="dm:ou_demo",
+        fetch_page=None,
+        dry_run=True,
+        max_messages=1,
+        batch_size=10,
+        since_created_at="2026-02-15T00:00:00Z",
+    )
+    assert out["dry_run"] is True
+    assert out["preview_message_ids"] == ["m2"]
+    assert out["preview_truncated"] is False
+    assert out["filters"]["since_created_at"] == "2026-02-15T00:00:00Z"
+    assert get_reaction_backfill_checkpoint(conn, "dm:ou_demo") is None
+
+
+def test_dry_run_marks_truncated_when_more_raw_remain() -> None:
+    conn = _conn()
+    _seed_source(conn)
+    _insert_raw(conn, message_id="a", created_at="2026-06-01T10:00:00Z")
+    _insert_raw(conn, message_id="b", created_at="2026-06-02T10:00:00Z")
+    out = execute_reaction_backfill(
+        conn,
+        source_id="dm:ou_demo",
+        fetch_page=None,
+        dry_run=True,
+        max_messages=1,
+        batch_size=10,
+    )
+    assert out["preview_message_ids"] == ["a"]
+    assert out["preview_truncated"] is True
+
+
+def test_dry_run_lists_inflight_message_first() -> None:
+    conn = _conn()
+    _seed_source(conn)
+    _insert_raw(conn, message_id="om_inf", created_at="2026-04-01T10:00:00Z")
+    upsert_reaction_backfill_checkpoint(
+        conn,
+        ReactionBackfillCheckpoint(
+            source_id="dm:ou_demo",
+            watermark_created_at=None,
+            watermark_message_id=None,
+            inflight_message_id="om_inf",
+            inflight_created_at="2026-04-01T10:00:00Z",
+            inflight_page_token="PT",
+        ),
+    )
+    out = execute_reaction_backfill(
+        conn,
+        source_id="dm:ou_demo",
+        fetch_page=None,
+        dry_run=True,
+        max_messages=1,
+        batch_size=5,
+    )
+    assert out["preview_message_ids"] == ["om_inf"]
+    assert out["preview_truncated"] is False
+
+
+def test_dry_run_inflight_then_sql_tail_in_order() -> None:
+    conn = _conn()
+    _seed_source(conn)
+    _insert_raw(conn, message_id="om_inf", created_at="2026-04-01T10:00:00Z")
+    _insert_raw(conn, message_id="om_after", created_at="2026-04-02T10:00:00Z")
+    upsert_reaction_backfill_checkpoint(
+        conn,
+        ReactionBackfillCheckpoint(
+            source_id="dm:ou_demo",
+            watermark_created_at=None,
+            watermark_message_id=None,
+            inflight_message_id="om_inf",
+            inflight_created_at="2026-04-01T10:00:00Z",
+            inflight_page_token="PT",
+        ),
+    )
+    out = execute_reaction_backfill(
+        conn,
+        source_id="dm:ou_demo",
+        fetch_page=None,
+        dry_run=True,
+        max_messages=5,
+        batch_size=10,
+    )
+    assert out["preview_message_ids"] == ["om_inf", "om_after"]
+    assert out["preview_truncated"] is False
+
+
+def test_execute_respects_since_and_chat_id_for_raw_scan() -> None:
+    conn = _conn()
+    _seed_source(conn)
+    _insert_raw(conn, message_id="wrong_chat", created_at="2026-05-01T10:00:00Z", chat_id="oc_a")
+    _insert_raw(conn, message_id="hit", created_at="2026-05-02T10:00:00Z", chat_id="oc_b")
+
+    mids: list[str] = []
+
+    def fetch(mid: str, tok: str | None) -> tuple[list[NormalizedReactionEvent], str | None]:
+        mids.append(mid)
+        return [], None
+
+    execute_reaction_backfill(
+        conn,
+        source_id="dm:ou_demo",
+        fetch_page=fetch,
+        batch_size=10,
+        min_interval_s=0.0,
+        max_messages=5,
+        since_created_at="2026-05-01T00:00:00Z",
+        chat_id="oc_b",
+    )
+    assert mids == ["hit"]

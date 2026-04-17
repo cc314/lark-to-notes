@@ -204,6 +204,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     reaction_reclassify_map_parser.set_defaults(handler=_handle_reaction_reclassify_map)
 
+    vault_rx_reconcile_parser = subparsers.add_parser(
+        "vault-reconcile-reactions",
+        help="Scan or repair vault reaction machine blocks vs SQLite ledger (lw-pzj.13.3)",
+    )
+    vault_rx_reconcile_parser.add_argument("--db", type=Path, default=_default_db_path())
+    vault_rx_reconcile_parser.add_argument(
+        "markdown_path",
+        type=Path,
+        help="Path to a vault Markdown file containing reaction machine blocks",
+    )
+    vault_rx_reconcile_parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Rewrite drifted reaction blocks in-place from the ledger",
+    )
+    vault_rx_reconcile_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+    vault_rx_reconcile_parser.set_defaults(handler=_handle_vault_reconcile_reactions)
+
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Report repository and fixture-harness health",
@@ -500,6 +522,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Stop after this many messages fully drained (0 = no limit)",
     )
     reaction_backfill_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List raw_messages scan order without calling lark-cli or mutating checkpoints",
+    )
+    reaction_backfill_parser.add_argument(
+        "--since",
+        default=None,
+        help="Only consider raw_messages with created_at >= this ISO-8601 timestamp",
+    )
+    reaction_backfill_parser.add_argument(
+        "--chat-id",
+        default=None,
+        help="Only consider raw_messages rows for this chat_id (optional scope)",
+    )
+    reaction_backfill_parser.add_argument(
         "--list-page-size",
         type=int,
         default=50,
@@ -651,6 +688,44 @@ def _handle_sources_list(args: argparse.Namespace) -> int:
             status = "enabled" if source.enabled else "disabled"
             print(f"- {source.source_id} [{status}] {source.name}")
     return 0
+
+
+def _handle_vault_reconcile_reactions(args: argparse.Namespace) -> int:
+    from lark_to_notes.render.reaction_vault_reconcile import (
+        repair_vault_note_reaction_blocks,
+        scan_vault_note_reaction_drift,
+    )
+
+    md_path: Path = args.markdown_path
+    text = md_path.read_text(encoding="utf-8")
+    db_path: Path = args.db
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(db_path)
+    init_db(conn)
+    repaired = 0
+    if args.write:
+        text, repaired = repair_vault_note_reaction_blocks(conn, note_text=text)
+        if repaired:
+            md_path.write_text(text, encoding="utf-8")
+        conn.commit()
+    report = scan_vault_note_reaction_drift(conn, note_text=text)
+    payload: dict[str, Any] = {
+        "db_path": str(db_path),
+        "markdown_path": str(md_path),
+        "write": bool(args.write),
+        "repaired_blocks": repaired,
+        **report,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"vault-reconcile-reactions: path={payload['markdown_path']} "
+            f"drift={payload['drift_count']}",
+        )
+        if args.write:
+            print(f"  repaired_blocks: {repaired}")
+    return 1 if int(payload["drift_count"]) > 0 else 0
 
 
 def _handle_reaction_reclassify_map(args: argparse.Namespace) -> int:
@@ -1843,21 +1918,43 @@ def _handle_reaction_backfill(args: argparse.Namespace) -> int:
     pol = str(args.reaction_policy_version).strip()
     max_m = int(args.max_messages)
     max_messages = None if max_m <= 0 else max_m
-    fetch = make_lark_cli_reactions_list_fetcher(
-        source_id,
-        page_size=int(args.list_page_size),
-    )
+    since_raw = args.since
+    since_created_at = str(since_raw).strip() if since_raw else None
+    chat_raw = args.chat_id
+    chat_id = str(chat_raw).strip() if chat_raw else None
+    dry_run = bool(args.dry_run)
     with RuntimeLock(lock_path, owner_tag=f"reaction-backfill:{source_id}"):
-        summary = execute_reaction_backfill(
-            conn,
-            source_id=source_id,
-            fetch_page=fetch,
-            batch_size=int(args.batch_size),
-            min_interval_s=max(0, int(args.min_interval_ms)) / 1000.0,
-            governance_version=gov,
-            policy_version=pol,
-            max_messages=max_messages,
-        )
+        if dry_run:
+            summary = execute_reaction_backfill(
+                conn,
+                source_id=source_id,
+                fetch_page=None,
+                batch_size=int(args.batch_size),
+                min_interval_s=max(0, int(args.min_interval_ms)) / 1000.0,
+                governance_version=gov,
+                policy_version=pol,
+                max_messages=max_messages,
+                dry_run=True,
+                since_created_at=since_created_at,
+                chat_id=chat_id,
+            )
+        else:
+            fetch = make_lark_cli_reactions_list_fetcher(
+                source_id,
+                page_size=int(args.list_page_size),
+            )
+            summary = execute_reaction_backfill(
+                conn,
+                source_id=source_id,
+                fetch_page=fetch,
+                batch_size=int(args.batch_size),
+                min_interval_s=max(0, int(args.min_interval_ms)) / 1000.0,
+                governance_version=gov,
+                policy_version=pol,
+                max_messages=max_messages,
+                since_created_at=since_created_at,
+                chat_id=chat_id,
+            )
     payload = dict(summary)
     payload["db_path"] = str(db_path)
     payload["runtime"] = asdict(health_report(conn))
@@ -1865,13 +1962,21 @@ def _handle_reaction_backfill(args: argparse.Namespace) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"db_path: {payload['db_path']}")
-        print(
-            f"source_id: {payload['source_id']}  "
-            f"messages_processed: {payload['messages_processed']}  "
-            f"rows_inserted: {payload['rows_inserted']}  "
-            f"api_calls: {payload['api_calls']}  "
-            f"batches_completed: {payload['batches_completed']}",
-        )
+        if payload.get("dry_run"):
+            print(
+                f"source_id: {payload['source_id']}  DRY-RUN  "
+                f"preview_count: {len(payload.get('preview_message_ids', []))}  "
+                f"truncated: {payload.get('preview_truncated')}  "
+                f"filters: {payload.get('filters')}",
+            )
+        else:
+            print(
+                f"source_id: {payload['source_id']}  "
+                f"messages_processed: {payload['messages_processed']}  "
+                f"rows_inserted: {payload['rows_inserted']}  "
+                f"api_calls: {payload['api_calls']}  "
+                f"batches_completed: {payload['batches_completed']}",
+            )
     return 1 if payload.get("last_error") else 0
 
 

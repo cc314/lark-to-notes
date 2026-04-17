@@ -99,11 +99,17 @@ def format_reaction_summary_markdown(
     policy_version: str = "",
     last_ledger_event_id: str = "",
     last_ingested_at: str = "",
+    wrap: bool = True,
 ) -> str:
     """Format a wrapped machine block summarizing effective reaction counts.
 
     *effective_counts* maps ``(emoji_type, operator_key)`` to a non-negative
     integer count (see :mod:`lark_to_notes.intake.reaction_effective`).
+
+    Args:
+        wrap: When ``False``, return only the inner Markdown (no ``ltn:`` HTML
+            comment envelope). Callers such as :func:`~lark_to_notes.render.blocks.replace_block`
+            supply the envelope separately (lw-pzj.13.3).
     """
 
     block_id = reaction_block_id(source_id, message_id)
@@ -171,4 +177,6 @@ def format_reaction_summary_markdown(
         ]
     )
     body = "\n".join(lines)
-    return wrap_block(block_id, body)
+    if wrap:
+        return wrap_block(block_id, body)
+    return body

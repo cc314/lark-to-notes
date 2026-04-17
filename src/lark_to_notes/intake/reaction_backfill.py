@@ -145,34 +145,163 @@ def _list_next_raw_messages(
     watermark_created_at: str | None,
     watermark_message_id: str | None,
     limit: int,
+    since_created_at: str | None = None,
+    chat_id: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return up to *limit* ``(message_id, created_at)`` rows after the watermark."""
 
-    if watermark_created_at is None or watermark_message_id is None:
-        rows = conn.execute(
-            """
-            SELECT message_id, created_at FROM raw_messages
-            WHERE source_id = ?
-            ORDER BY created_at ASC, message_id ASC
-            LIMIT ?
-            """,
-            (source_id, limit),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT message_id, created_at FROM raw_messages
-            WHERE source_id = ?
-              AND (
-                created_at > ?
-                OR (created_at = ? AND message_id > ?)
-              )
-            ORDER BY created_at ASC, message_id ASC
-            LIMIT ?
-            """,
-            (source_id, watermark_created_at, watermark_created_at, watermark_message_id, limit),
-        ).fetchall()
+    clauses = ["source_id = ?"]
+    params: list[Any] = [source_id]
+    if watermark_created_at is not None and watermark_message_id is not None:
+        clauses.append("(created_at > ? OR (created_at = ? AND message_id > ?))")
+        params.extend([watermark_created_at, watermark_created_at, watermark_message_id])
+    if since_created_at:
+        clauses.append("created_at >= ?")
+        params.append(since_created_at)
+    if chat_id:
+        clauses.append("chat_id = ?")
+        params.append(chat_id)
+    where_sql = " AND ".join(clauses)
+    sql = f"""
+        SELECT message_id, created_at FROM raw_messages
+        WHERE {where_sql}
+        ORDER BY created_at ASC, message_id ASC
+        LIMIT ?
+    """
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
     return [(str(r["message_id"]), str(r["created_at"])) for r in rows]
+
+
+def _dry_run_reaction_backfill(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    batch_size: int,
+    max_messages: int | None,
+    since_created_at: str | None,
+    chat_id: str | None,
+) -> dict[str, Any]:
+    """Simulate message scan order without API calls or checkpoint writes (lw-pzj.6.4)."""
+
+    base = get_reaction_backfill_checkpoint(conn, source_id)
+    if base is None:
+        cp = ReactionBackfillCheckpoint(
+            source_id=source_id,
+            watermark_created_at=None,
+            watermark_message_id=None,
+        )
+    else:
+        cp = base
+    preview_ids: list[str] = []
+    truncated = False
+    wca, wmid = cp.watermark_created_at, cp.watermark_message_id
+    if cp.inflight_message_id and cp.inflight_created_at:
+        preview_ids.append(str(cp.inflight_message_id))
+        wca, wmid = cp.inflight_created_at, str(cp.inflight_message_id)
+        if max_messages is not None and len(preview_ids) >= max_messages:
+            more = _list_next_raw_messages(
+                conn,
+                source_id=source_id,
+                watermark_created_at=wca,
+                watermark_message_id=wmid,
+                limit=1,
+                since_created_at=since_created_at,
+                chat_id=chat_id,
+            )
+            truncated = bool(more)
+            return {
+                "source_id": source_id,
+                "dry_run": True,
+                "preview_message_ids": preview_ids,
+                "preview_truncated": truncated,
+                "filters": {"since_created_at": since_created_at, "chat_id": chat_id},
+                "messages_processed": 0,
+                "api_calls": 0,
+                "rows_inserted": 0,
+                "batches_completed": 0,
+                "watermark_created_at": cp.watermark_created_at,
+                "watermark_message_id": cp.watermark_message_id,
+                "inflight_message_id": cp.inflight_message_id,
+                "inflight_page_token": cp.inflight_page_token,
+                "last_error": None,
+            }
+
+    while True:
+        if max_messages is not None and len(preview_ids) >= max_messages:
+            more = _list_next_raw_messages(
+                conn,
+                source_id=source_id,
+                watermark_created_at=wca,
+                watermark_message_id=wmid,
+                limit=1,
+                since_created_at=since_created_at,
+                chat_id=chat_id,
+            )
+            truncated = bool(more)
+            break
+        lim = batch_size
+        if max_messages is not None:
+            lim = min(lim, max_messages - len(preview_ids))
+        if lim <= 0:
+            break
+        rows = _list_next_raw_messages(
+            conn,
+            source_id=source_id,
+            watermark_created_at=wca,
+            watermark_message_id=wmid,
+            limit=lim,
+            since_created_at=since_created_at,
+            chat_id=chat_id,
+        )
+        if not rows:
+            break
+        for mid, mca in rows:
+            preview_ids.append(mid)
+            wca, wmid = mca, mid
+            if max_messages is not None and len(preview_ids) >= max_messages:
+                more = _list_next_raw_messages(
+                    conn,
+                    source_id=source_id,
+                    watermark_created_at=wca,
+                    watermark_message_id=wmid,
+                    limit=1,
+                    since_created_at=since_created_at,
+                    chat_id=chat_id,
+                )
+                truncated = bool(more)
+                return {
+                    "source_id": source_id,
+                    "dry_run": True,
+                    "preview_message_ids": preview_ids,
+                    "preview_truncated": truncated,
+                    "filters": {"since_created_at": since_created_at, "chat_id": chat_id},
+                    "messages_processed": 0,
+                    "api_calls": 0,
+                    "rows_inserted": 0,
+                    "batches_completed": 0,
+                    "watermark_created_at": cp.watermark_created_at,
+                    "watermark_message_id": cp.watermark_message_id,
+                    "inflight_message_id": cp.inflight_message_id,
+                    "inflight_page_token": cp.inflight_page_token,
+                    "last_error": None,
+                }
+    return {
+        "source_id": source_id,
+        "dry_run": True,
+        "preview_message_ids": preview_ids,
+        "preview_truncated": truncated,
+        "filters": {"since_created_at": since_created_at, "chat_id": chat_id},
+        "messages_processed": 0,
+        "api_calls": 0,
+        "rows_inserted": 0,
+        "batches_completed": 0,
+        "watermark_created_at": cp.watermark_created_at,
+        "watermark_message_id": cp.watermark_message_id,
+        "inflight_message_id": cp.inflight_message_id,
+        "inflight_page_token": cp.inflight_page_token,
+        "last_error": None,
+    }
 
 
 def _drain_message_pages(
@@ -242,15 +371,30 @@ def execute_reaction_backfill(
     conn: sqlite3.Connection,
     *,
     source_id: str,
-    fetch_page: FetchPageFn,
+    fetch_page: FetchPageFn | None = None,
     batch_size: int = 25,
     min_interval_s: float = 0.2,
     governance_version: str = REACTION_INTAKE_GOVERNANCE_VERSION,
     policy_version: str = "",
     max_messages: int | None = None,
     sleep_fn: SleepFn | None = None,
+    dry_run: bool = False,
+    since_created_at: str | None = None,
+    chat_id: str | None = None,
 ) -> dict[str, Any]:
     """Run backfill until *max_messages* reached or there is nothing left to do."""
+
+    if dry_run:
+        return _dry_run_reaction_backfill(
+            conn,
+            source_id=source_id,
+            batch_size=batch_size,
+            max_messages=max_messages,
+            since_created_at=since_created_at,
+            chat_id=chat_id,
+        )
+    if fetch_page is None:
+        raise ValueError("fetch_page is required when dry_run is False")
 
     sleeper: SleepFn = sleep_fn or time.sleep
     base = get_reaction_backfill_checkpoint(conn, source_id)
@@ -315,6 +459,8 @@ def execute_reaction_backfill(
                 watermark_created_at=cp.watermark_created_at,
                 watermark_message_id=cp.watermark_message_id,
                 limit=remaining,
+                since_created_at=since_created_at,
+                chat_id=chat_id,
             )
             if not rows:
                 break
